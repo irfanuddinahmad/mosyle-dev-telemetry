@@ -1,12 +1,19 @@
+# System Files
 .DS_Store
-test-data/
-*.log
-*.tmp
 .idea/
 .vscode/
-install-user-level.sh
-test-collector.sh
+
+# Logs & Temp Files
+*.log
+*.tmp
+test-data/
 archive/
+
+# Local Data (Should not be committed)
 hourly_data.json
 daily_aggregate.json
 last_send_timestamp
+
+# Scripts (Local-only/Test scripts)
+install-user-level.sh
+test-collector.sh
