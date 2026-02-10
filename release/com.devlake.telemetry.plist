@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Label - Unique identifier for this daemon -->
+    <key>Label</key>
+    <string>com.devlake.telemetry</string>
+    
+    <!-- Program to run -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/devlake-telemetry-collector.sh</string>
+    </array>
+    
+    <!-- Run every hour (3600 seconds) -->
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    
+    <!-- Start on load (system boot) -->
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <!-- Keep the daemon alive - restart if it crashes -->
+
+    
+    <!-- Standard output log -->
+    <key>StandardOutPath</key>
+    <string>/var/log/devlake-telemetry.log</string>
+    
+    <!-- Standard error log -->
+    <key>StandardErrorPath</key>
+    <string>/var/log/devlake-telemetry-error.log</string>
+    
+    <!-- Working directory -->
+    <key>WorkingDirectory</key>
+    <string>/usr/local/bin</string>
+    
+    <!-- Environment variables -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    
+    <!-- Process priority (nice value) - run with low priority to not impact user -->
+    <key>Nice</key>
+    <integer>10</integer>
+    
+    <!-- Throttle interval - prevent rapid restart loops (10 seconds) -->
+
+</dict>
+</plist>

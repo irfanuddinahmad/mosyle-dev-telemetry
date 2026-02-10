@@ -1,0 +1,28 @@
+{
+  "webhook_url": "https://your-devlake-instance.com/api/webhooks/your-id",
+  "collection_interval_seconds": 3600,
+  "data_retention_days": 30,
+  "privacy": {
+    "collect_command_arguments": false,
+    "collect_file_paths": false,
+    "collect_urls": false,
+    "exclude_commands": []
+  },
+  "developer_tools": [
+    "vscode",
+    "intellij",
+    "pycharm",
+    "goland",
+    "webstorm",
+    "docker",
+    "git",
+    "go",
+    "node",
+    "npm",
+    "python",
+    "java",
+    "make",
+    "gradle",
+    "maven"
+  ]
+}
