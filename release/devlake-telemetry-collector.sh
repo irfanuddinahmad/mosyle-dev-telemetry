@@ -282,14 +282,14 @@ collect_hourly_data() {
     local projects
     projects=$(collect_active_projects)
     
-    # Determine if this hour counts as "active" (any tools running or commands executed)
+    # Determine if this hour counts as "active" (only if commands executed or file activity detected)
     local is_active=false
-    local tool_count
-    tool_count=$(echo "$tools" | jq 'length')
     local cmd_count
     cmd_count=$(echo "$commands" | jq 'keys | length')
+    local project_count
+    project_count=$(echo "$projects" | jq 'length')
     
-    if [[ $tool_count -gt 0 ]] || [[ $cmd_count -gt 0 ]]; then
+    if [[ $cmd_count -gt 0 ]] || [[ $project_count -gt 0 ]]; then
         is_active=true
     fi
     
@@ -342,8 +342,8 @@ aggregate_hourly_to_daily() {
                 value: (map(.value) | add)
             }) | from_entries) as $summed_cmds |
             
-            # Merge tools (unique)
-            (($daily.tools_used + $hourly.tools_used) | unique) as $merged_tools |
+            # Merge tools (unique) - ONLY if active
+            (if $hourly.is_active then ($daily.tools_used + $hourly.tools_used) else $daily.tools_used end | unique) as $merged_tools |
             
             # Merge projects (unique)
             (($daily.projects + $hourly.projects) | unique) as $merged_projects |

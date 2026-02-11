@@ -30,7 +30,11 @@ The script `devlake-telemetry-collector.sh` is triggered every hour by the Launc
 - **Privacy**: Collects only the **directory name** of the repo (e.g., `mosyle-dev-telemetry`), not the full path or file contents.
 
 ### D. Activity Status
-- Calculates `is_active`: `true` if *any* commands were run OR *any* developer tools are running.
+- Calculates `is_active`: `true` ONLY if:
+  - Commands were executed (`cmd_count > 0`)
+  - OR
+  - Project files were modified (`project_count > 0`)
+- **Note**: Merely having tools open (like VS Code) does *not* count as active.
 
 ## 2. Local Aggregation (Daily)
 Data is processed entirely on the local machine to ensure privacy and reduce network traffic.
