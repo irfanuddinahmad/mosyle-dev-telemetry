@@ -389,12 +389,21 @@ send_daily_data() {
     date=$(echo "$daily_data" | jq -r '.date')
     local username
     username=$(get_username)
+    local hostname
+    hostname=$(hostname)
+    local git_email
+    git_email=$(git config --global user.email || echo "")
+    local git_name
+    git_name=$(git config --global user.name || echo "")
     
     # Build the final payload
     local payload
-    payload=$(echo "$daily_data" | jq --arg dev "$username" '{
+    payload=$(echo "$daily_data" | jq --arg dev "$username" --arg host "$hostname" --arg email "$git_email" --arg name "$git_name" '{
         date: .date,
         developer: $dev,
+        hostname: $host,
+        email: $email,
+        name: $name,
         metrics: {
             active_hours: .active_hours,
             tools_used: .tools_used,
