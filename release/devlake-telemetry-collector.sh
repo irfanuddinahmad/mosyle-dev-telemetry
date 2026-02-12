@@ -288,7 +288,7 @@ collect_active_tools() {
     fi
 }
 
-# OPTIMIZED: Faster directory search with caching
+# REVERTED: Real-time project detection without caching
 collect_active_projects() {
     local username
     username=$(get_username)
@@ -301,36 +301,11 @@ collect_active_projects() {
         return
     fi
     
-    # OPTIMIZATION: Use cache to avoid slow find operations
-    local cache_file="$DATA_DIR/projects_cache.json"
-    local cache_age=1800  # 30 minutes
-    
-    # Return cached result if fresh enough
-    if [[ -f "$cache_file" ]]; then
-        local cache_mtime
-        cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo "0")
-        if [[ $((CURRENT_EPOCH - cache_mtime)) -lt $cache_age ]]; then
-            cat "$cache_file"
-            return
-        fi
-    fi
-    
     local projects=()
     
-    # OPTIMIZATION: Search only common dev directories instead of entire home
-    local search_dirs=(
-        "$user_home/projects"
-        "$user_home/code"
-        "$user_home/dev"
-        "$user_home/workspace"
-        "$user_home/Documents"
-        "$user_home/src"
-    )
-    
-    for base_dir in "${search_dirs[@]}"; do
-        [[ ! -d "$base_dir" ]] && continue
-        
-        # Find .git directories and check for recent activity
+    # Find recently accessed git repositories
+    # Look for .git directories that were accessed in the last hour
+    if [[ -d "$user_home" ]]; then
         while IFS= read -r git_dir; do
             [[ -z "$git_dir" ]] && continue
             
@@ -339,24 +314,19 @@ collect_active_projects() {
             local project_name
             project_name=$(basename "$project_dir")
             
-            # OPTIMIZATION: Use -quit for early exit after first match
-            if find "$project_dir" -type f -mmin -60 -print -quit 2>/dev/null | grep -q .; then
+            # Check if there was recent activity (files modified in last hour)
+            if find "$project_dir" -type f -mmin -60 2>/dev/null | grep -q .; then
                 projects+=("$project_name")
             fi
-        done < <(find "$base_dir" -type d -name ".git" -maxdepth 3 2>/dev/null || true)
-    done
-    
-    # Output as JSON array (unique values)
-    local result
-    if [[ ${#projects[@]} -gt 0 ]]; then
-        result=$(printf '%s\n' "${projects[@]}" | sort -u | jq -Rs 'split("\n") | map(select(length > 0))')
-    else
-        result="[]"
+        done < <(find "$user_home" -type d -name ".git" -maxdepth 4 2>/dev/null || true)
     fi
     
-    # Cache the result
-    echo "$result" > "$cache_file"
-    echo "$result"
+    # Output as JSON array (unique values)
+    if [[ ${#projects[@]} -gt 0 ]]; then
+        printf '%s\n' "${projects[@]}" | sort -u | jq -Rs 'split("\n") | map(select(length > 0))'
+    else
+        echo "[]"
+    fi
 }
 
 # OPTIMIZED: Parallel data collection
