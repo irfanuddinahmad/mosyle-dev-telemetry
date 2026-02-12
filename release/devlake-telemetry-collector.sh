@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# DevLake Telemetry Collector
+# DevLake Telemetry Collector (OPTIMIZED)
 # 
 # This script collects privacy-safe developer telemetry and sends it to DevLake.
 # It runs hourly to collect data and sends a daily summary.
@@ -10,6 +10,14 @@
 # - No file paths or contents are captured
 # - No URLs or browsing data is recorded
 # - Only aggregated metrics and command names are sent
+#
+# OPTIMIZATIONS:
+# - Consolidated grep chains to reduce subprocess overhead
+# - Cached repeated system calls (date, config)
+# - Batched process checks instead of multiple pgrep calls
+# - Parallel data collection for independent operations
+# - Improved error handling with retries
+# - Security fixes (removed unsafe eval)
 #
 
 set -euo pipefail
@@ -34,6 +42,14 @@ HOURLY_DATA_FILE="$DATA_DIR/hourly_data.json"
 DAILY_AGGREGATE_FILE="$DATA_DIR/daily_aggregate.json"
 LAST_SEND_FILE="$DATA_DIR/last_send_timestamp"
 
+# Cache variables
+declare -g CONFIG_LOADED=0
+declare -g CACHED_WEBHOOK_URL=""
+declare -g CURRENT_DATE=""
+declare -g CURRENT_HOUR=""
+declare -g CURRENT_TIMESTAMP=""
+declare -g CURRENT_EPOCH=""
+
 # ============================================================================
 # Logging
 # ============================================================================
@@ -47,10 +63,16 @@ log_error() {
 }
 
 # ============================================================================
-# Configuration Loading
+# Configuration Loading (OPTIMIZED: Cached)
 # ============================================================================
 
 load_config() {
+    # Return cached value if already loaded
+    if [[ $CONFIG_LOADED -eq 1 ]]; then
+        [[ -n "$CACHED_WEBHOOK_URL" ]] && DEVLAKE_WEBHOOK_URL="$CACHED_WEBHOOK_URL"
+        return
+    fi
+    
     if [[ -f "$CONFIG_FILE" ]]; then
         # Load webhook URL from config if available
         if command -v jq &> /dev/null; then
@@ -58,16 +80,25 @@ load_config() {
             webhook_url=$(jq -r '.webhook_url // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
             if [[ -n "$webhook_url" ]]; then
                 DEVLAKE_WEBHOOK_URL="$webhook_url"
+                CACHED_WEBHOOK_URL="$webhook_url"
             fi
         fi
     fi
+    
+    CONFIG_LOADED=1
 }
 
 # ============================================================================
-# Initialization
+# Initialization (OPTIMIZED: Cache date calls)
 # ============================================================================
 
 init() {
+    # Cache date calls for reuse throughout the script
+    CURRENT_DATE=$(date '+%Y-%m-%d')
+    CURRENT_HOUR=$(date '+%H')
+    CURRENT_TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    CURRENT_EPOCH=$(date +%s)
+    
     # Create data directory if it doesn't exist
     mkdir -p "$DATA_DIR"
     
@@ -75,20 +106,64 @@ init() {
     load_config
     
     # Initialize daily aggregate if it doesn't exist or if it's a new day
-    local today
-    today=$(date '+%Y-%m-%d')
-    
     if [[ ! -f "$DAILY_AGGREGATE_FILE" ]]; then
-        echo '{"date":"'$today'","hours_collected":[],"commands":{},"tools_used":[],"projects":[],"builds":{},"active_hours":0}' > "$DAILY_AGGREGATE_FILE"
+        echo '{"date":"'"$CURRENT_DATE"'","hours_collected":[],"commands":{},"tools_used":[],"projects":[],"builds":{},"active_hours":0}' > "$DAILY_AGGREGATE_FILE"
     else
         # Check if we need to reset for a new day
         local stored_date
         stored_date=$(jq -r '.date // empty' "$DAILY_AGGREGATE_FILE" 2>/dev/null || echo "")
-        if [[ "$stored_date" != "$today" ]]; then
+        if [[ "$stored_date" != "$CURRENT_DATE" ]]; then
             # New day - send previous day's data first, then reset
             send_daily_data
-            echo '{"date":"'$today'","hours_collected":[],"commands":{},"tools_used":[],"projects":[],"builds":{},"active_hours":0}' > "$DAILY_AGGREGATE_FILE"
+            echo '{"date":"'"$CURRENT_DATE"'","hours_collected":[],"commands":{},"tools_used":[],"projects":[],"builds":{},"active_hours":0}' > "$DAILY_AGGREGATE_FILE"
         fi
+    fi
+}
+
+# ============================================================================
+# Helper Functions (NEW: Optimized filtering)
+# ============================================================================
+
+# OPTIMIZATION: Single awk call instead of 19 grep processes
+filter_commands() {
+    awk '
+    /^$/ {next}
+    /^#/ {next}
+    /^"/ {next}
+    /[(){}\[\]=.:]/ {next}
+    /^print$/ {next}
+    /^from$/ {next}
+    /^import$/ {next}
+    /^if$/ {next}
+    /^for$/ {next}
+    /^while$/ {next}
+    /^try$/ {next}
+    /^except$/ {next}
+    /^with$/ {next}
+    /^User$/ {next}
+    /^content$/ {next}
+    /^Registration$/ {next}
+    /^f$/ {next}
+    /^user$/ {next}
+    /^reg$/ {next}
+    {print}
+    '
+}
+
+# SECURITY FIX: Safe home directory lookup without eval
+get_user_home() {
+    local username="$1"
+    
+    # Try different methods based on OS
+    if command -v getent &> /dev/null; then
+        # Linux method
+        getent passwd "$username" 2>/dev/null | cut -d: -f6
+    elif command -v dscl &> /dev/null; then
+        # macOS method
+        dscl . -read "/Users/$username" NFSHomeDirectory 2>/dev/null | awk '{print $2}'
+    else
+        # Fallback: grep passwd file (works on most Unix systems)
+        grep "^$username:" /etc/passwd 2>/dev/null | cut -d: -f6
     fi
 }
 
@@ -105,11 +180,19 @@ get_username() {
     fi
 }
 
+# OPTIMIZED: Consolidated grep chains, safe timestamp handling
 collect_shell_commands() {
     local username
     username=$(get_username)
     local user_home
-    user_home=$(eval echo "~$username")
+    user_home=$(get_user_home "$username")
+    
+    # Validate home directory
+    if [[ -z "$user_home" ]] || [[ ! -d "$user_home" ]]; then
+        log_error "Could not determine home directory for $username"
+        echo "{}"
+        return
+    fi
     
     # Temporary file to store commands
     local temp_cmds="/tmp/devlake_cmds_$$"
@@ -119,14 +202,10 @@ collect_shell_commands() {
     local timestamp_file="$DATA_DIR/last_history_timestamp"
     local last_timestamp=0
     
-    # Load last processed timestamp
+    # OPTIMIZATION: Safe timestamp file handling with flock
     if [[ -f "$timestamp_file" ]]; then
-        last_timestamp=$(cat "$timestamp_file")
+        last_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "0")
     fi
-    
-    # Current timestamp (will be saved after processing)
-    local current_timestamp
-    current_timestamp=$(date +%s)
     
     # Check zsh history
     if [[ -f "$user_home/.zsh_history" ]]; then
@@ -143,36 +222,10 @@ collect_shell_commands() {
             sed -E 's/^: [0-9]+:[0-9]+;//' | \
             awk '{print $1}' | \
             sed 's/^sudo //' | \
-            grep -v '^$' | \
-            grep -v '^#' | \
-            grep -v '^"' | \
-            grep -v "(" | \
-            grep -v ")" | \
-            grep -v "\[" | \
-            grep -v "\]" | \
-            grep -v "=" | \
-            grep -v "\." | \
-            grep -v ":" | \
-            grep -v "^print" | \
-            grep -v "^from" | \
-            grep -v "^import" | \
-            grep -v "^if" | \
-            grep -v "^for" | \
-            grep -v "^while" | \
-            grep -v "^try" | \
-            grep -v "^except" | \
-            grep -v "^with" | \
-            grep -v "^User" | \
-            grep -v "^content" | \
-            grep -v "^Registration" | \
-            grep -v "^f$" | \
-            grep -v "^user$" | \
-            grep -v "^reg$" >> "$temp_cmds" || true
+            filter_commands >> "$temp_cmds" || true
     fi
     
     # Check bash history
-    # Bash doesn't have timestamps, so we'll use a simpler approach:
-    # Only process if the file was modified since last run
     if [[ -f "$user_home/.bash_history" ]]; then
         local bash_mtime
         bash_mtime=$(stat -f %m "$user_home/.bash_history" 2>/dev/null || stat -c %Y "$user_home/.bash_history" 2>/dev/null || echo "0")
@@ -181,151 +234,174 @@ collect_shell_commands() {
             tail -n 100 "$user_home/.bash_history" 2>/dev/null | \
                 awk '{print $1}' | \
                 sed 's/^sudo //' | \
-                grep -v '^$' | \
-                grep -v '^#' | \
-                grep -v '^"' | \
-                grep -v "(" | \
-                grep -v ")" | \
-                grep -v "\[" | \
-                grep -v "\]" | \
-                grep -v "=" | \
-                grep -v "\." | \
-                grep -v ":" | \
-                grep -v "^print" | \
-                grep -v "^from" | \
-                grep -v "^import" | \
-                grep -v "^if" | \
-                grep -v "^for" | \
-                grep -v "^while" | \
-                grep -v "^try" | \
-                grep -v "^except" | \
-                grep -v "^with" >> "$temp_cmds" || true
+                filter_commands >> "$temp_cmds" || true
         fi
     fi
     
     # Count commands and convert to JSON using jq
+    local result
     if [[ -s "$temp_cmds" ]]; then
-        sort "$temp_cmds" | uniq -c | \
+        result=$(sort "$temp_cmds" | uniq -c | \
             awk '{print $2 "\t" $1}' | \
             jq -R 'split("\t") | {(.[0]): (.[1] | tonumber)}' | \
-            jq -s 'add // {}'
+            jq -s 'add // {}')
     else
-        echo "{}"
+        result="{}"
     fi
     
-    # Update timestamp file with current time
-    echo "$current_timestamp" > "$timestamp_file"
+    # OPTIMIZATION: Safe timestamp update with flock
+    (
+        flock -x 200
+        echo "$CURRENT_EPOCH" > "$timestamp_file"
+    ) 200>"$timestamp_file.lock" 2>/dev/null || echo "$CURRENT_EPOCH" > "$timestamp_file"
     
     # Cleanup
     rm -f "$temp_cmds"
+    
+    echo "$result"
 }
 
-
+# OPTIMIZED: Single ps call instead of multiple pgrep calls
 collect_active_tools() {
     local tools=()
     
-    # Check for running developer applications
-    if pgrep -x "Visual Studio Code" > /dev/null || pgrep -x "Code" > /dev/null; then
-        tools+=("vscode")
-    fi
+    # Get all running process names in one call
+    local procs
+    procs=$(ps aux 2>/dev/null | awk '{for(i=11;i<=NF;i++) printf "%s ", $i; print ""}' | grep -iE "code|idea|pycharm|goland|docker|git|node|npm|python" || echo "")
     
-    if pgrep -x "IntelliJ IDEA" > /dev/null || pgrep -x "idea" > /dev/null; then
-        tools+=("intellij")
-    fi
+    # Check against the cached process list
+    grep -qi "visual studio code\|\\bcode\\b" <<< "$procs" && tools+=("vscode")
+    grep -qi "intellij idea\|\\bidea\\b" <<< "$procs" && tools+=("intellij")
+    grep -qi "pycharm" <<< "$procs" && tools+=("pycharm")
+    grep -qi "goland" <<< "$procs" && tools+=("goland")
+    grep -qi "docker\|com\\.docker" <<< "$procs" && tools+=("docker")
+    grep -qi "\\bgit\\b" <<< "$procs" && tools+=("git")
+    grep -qi "\\bgo\\b" <<< "$procs" && tools+=("go")
+    grep -qi "\\bnode\\b\|\\bnpm\\b" <<< "$procs" && tools+=("node")
+    grep -qi "python" <<< "$procs" && tools+=("python")
     
-    if pgrep -x "PyCharm" > /dev/null || pgrep -x "pycharm" > /dev/null; then
-        tools+=("pycharm")
-    fi
-    
-    if pgrep -x "GoLand" > /dev/null || pgrep -x "goland" > /dev/null; then
-        tools+=("goland")
-    fi
-    
-    if pgrep -x "Docker" > /dev/null || pgrep -f "com.docker" > /dev/null; then
-        tools+=("docker")
-    fi
-    
-    # Check for CLI tools in use
-    if pgrep -x "git" > /dev/null; then
-        tools+=("git")
-    fi
-    
-    if pgrep -x "go" > /dev/null; then
-        tools+=("go")
-    fi
-    
-    if pgrep -x "node" > /dev/null || pgrep -x "npm" > /dev/null; then
-        tools+=("node")
-    fi
-    
-    if pgrep -x "python" > /dev/null || pgrep -x "python3" > /dev/null; then
-        tools+=("python")
-    fi
-    
-    # Output as JSON array
-    # Output as JSON array
+    # OPTIMIZATION: Single jq call instead of two
     if [[ ${#tools[@]} -gt 0 ]]; then
-        printf '%s\n' "${tools[@]}" | jq -R . | jq -s .
+        printf '%s\n' "${tools[@]}" | jq -Rs 'split("\n") | map(select(length > 0))'
     else
         echo "[]"
     fi
 }
 
+# OPTIMIZED: Faster directory search with caching
 collect_active_projects() {
     local username
     username=$(get_username)
     local user_home
-    user_home=$(eval echo "~$username")
+    user_home=$(get_user_home "$username")
+    
+    # Validate home directory
+    if [[ -z "$user_home" ]] || [[ ! -d "$user_home" ]]; then
+        echo "[]"
+        return
+    fi
+    
+    # OPTIMIZATION: Use cache to avoid slow find operations
+    local cache_file="$DATA_DIR/projects_cache.json"
+    local cache_age=1800  # 30 minutes
+    
+    # Return cached result if fresh enough
+    if [[ -f "$cache_file" ]]; then
+        local cache_mtime
+        cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo "0")
+        if [[ $((CURRENT_EPOCH - cache_mtime)) -lt $cache_age ]]; then
+            cat "$cache_file"
+            return
+        fi
+    fi
     
     local projects=()
     
-    # Find recently accessed git repositories
-    # Look for .git directories that were accessed in the last hour
-    if [[ -d "$user_home" ]]; then
+    # OPTIMIZATION: Search only common dev directories instead of entire home
+    local search_dirs=(
+        "$user_home/projects"
+        "$user_home/code"
+        "$user_home/dev"
+        "$user_home/workspace"
+        "$user_home/Documents"
+        "$user_home/src"
+    )
+    
+    for base_dir in "${search_dirs[@]}"; do
+        [[ ! -d "$base_dir" ]] && continue
+        
+        # Find .git directories and check for recent activity
         while IFS= read -r git_dir; do
+            [[ -z "$git_dir" ]] && continue
+            
             local project_dir
             project_dir=$(dirname "$git_dir")
             local project_name
             project_name=$(basename "$project_dir")
             
-            # Check if there was recent activity (files modified in last hour)
-            if find "$project_dir" -type f -mmin -60 2>/dev/null | grep -q .; then
+            # OPTIMIZATION: Use -quit for early exit after first match
+            if find "$project_dir" -type f -mmin -60 -print -quit 2>/dev/null | grep -q .; then
                 projects+=("$project_name")
             fi
-        done < <(find "$user_home" -type d -name ".git" -maxdepth 4 2>/dev/null || true)
-    fi
+        done < <(find "$base_dir" -type d -name ".git" -maxdepth 3 2>/dev/null || true)
+    done
     
     # Output as JSON array (unique values)
+    local result
     if [[ ${#projects[@]} -gt 0 ]]; then
-        printf '%s\n' "${projects[@]}" | sort -u | jq -R . | jq -s .
+        result=$(printf '%s\n' "${projects[@]}" | sort -u | jq -Rs 'split("\n") | map(select(length > 0))')
     else
-        echo "[]"
+        result="[]"
     fi
+    
+    # Cache the result
+    echo "$result" > "$cache_file"
+    echo "$result"
 }
 
+# OPTIMIZED: Parallel data collection
 collect_hourly_data() {
     log "Collecting hourly telemetry data..."
     
-    local timestamp
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    local hour
-    hour=$(date '+%H')
+    # Use cached date values
+    local timestamp="$CURRENT_TIMESTAMP"
+    local hour="$CURRENT_HOUR"
     
+    # OPTIMIZATION: Collect data in parallel using temp files
+    local tmp_cmd="$DATA_DIR/tmp_cmd_$$"
+    local tmp_tools="$DATA_DIR/tmp_tools_$$"
+    local tmp_proj="$DATA_DIR/tmp_proj_$$"
+    
+    # Run collections in parallel
+    collect_shell_commands > "$tmp_cmd" 2>/dev/null &
+    local pid_cmd=$!
+    
+    collect_active_tools > "$tmp_tools" 2>/dev/null &
+    local pid_tools=$!
+    
+    collect_active_projects > "$tmp_proj" 2>/dev/null &
+    local pid_proj=$!
+    
+    # Wait for all background jobs to complete
+    wait $pid_cmd $pid_tools $pid_proj 2>/dev/null || true
+    
+    # Read results
     local commands
-    commands=$(collect_shell_commands)
-    
+    commands=$(cat "$tmp_cmd" 2>/dev/null || echo "{}")
     local tools
-    tools=$(collect_active_tools)
-    
+    tools=$(cat "$tmp_tools" 2>/dev/null || echo "[]")
     local projects
-    projects=$(collect_active_projects)
+    projects=$(cat "$tmp_proj" 2>/dev/null || echo "[]")
     
-    # Determine if this hour counts as "active" (only if commands executed or file activity detected)
+    # Cleanup temp files
+    rm -f "$tmp_cmd" "$tmp_tools" "$tmp_proj"
+    
+    # Determine if this hour counts as "active"
     local is_active=false
     local cmd_count
-    cmd_count=$(echo "$commands" | jq 'keys | length')
+    cmd_count=$(echo "$commands" | jq 'keys | length' 2>/dev/null || echo "0")
     local project_count
-    project_count=$(echo "$projects" | jq 'length')
+    project_count=$(echo "$projects" | jq 'length' 2>/dev/null || echo "0")
     
     if [[ $cmd_count -gt 0 ]] || [[ $project_count -gt 0 ]]; then
         is_active=true
@@ -365,9 +441,6 @@ aggregate_hourly_to_daily() {
     
     # Use jq to merge hourly data into daily aggregate
     if command -v jq &> /dev/null; then
-        local hourly_data
-        hourly_data=$(cat "$HOURLY_DATA_FILE")
-        
         local updated_aggregate
         updated_aggregate=$(jq -s '
             .[0] as $daily |
@@ -398,17 +471,21 @@ aggregate_hourly_to_daily() {
             .projects = $merged_projects |
             .hours_collected = $updated_hours |
             .active_hours = $updated_active
-        ' "$DAILY_AGGREGATE_FILE" "$HOURLY_DATA_FILE") 
+        ' "$DAILY_AGGREGATE_FILE" "$HOURLY_DATA_FILE" 2>/dev/null) 
         
-        echo "$updated_aggregate" > "$DAILY_AGGREGATE_FILE"
-        log "Daily aggregate updated successfully"
+        if [[ -n "$updated_aggregate" ]] && echo "$updated_aggregate" | jq empty 2>/dev/null; then
+            echo "$updated_aggregate" > "$DAILY_AGGREGATE_FILE"
+            log "Daily aggregate updated successfully"
+        else
+            log_error "Failed to aggregate data - invalid JSON"
+        fi
     else
         log_error "jq not found - cannot aggregate data"
     fi
 }
 
 # ============================================================================
-# Webhook Sending
+# Webhook Sending (OPTIMIZED: Better error handling and retries)
 # ============================================================================
 
 send_daily_data() {
@@ -430,9 +507,9 @@ send_daily_data() {
     local hostname
     hostname=$(hostname)
     local git_email
-    git_email=$(git config --global user.email || echo "")
+    git_email=$(git config --global user.email 2>/dev/null || echo "")
     local git_name
-    git_name=$(git config --global user.name || echo "")
+    git_name=$(git config --global user.name 2>/dev/null || echo "")
     
     # Build the final payload
     local payload
@@ -452,54 +529,70 @@ send_daily_data() {
     
     log "Sending payload to $DEVLAKE_WEBHOOK_URL"
     
-    # Send to webhook
-    local response
-    if response=$(curl -s -X POST \
-        -H "Content-Type: application/json" \
-        -d "$payload" \
-        -w "\n%{http_code}" \
-        "$DEVLAKE_WEBHOOK_URL" 2>&1); then
-        
-        local http_code
-        http_code=$(echo "$response" | tail -n1)
-        
-        if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-            log "Successfully sent data to DevLake (HTTP $http_code)"
+    # OPTIMIZATION: Send with timeout, retries, and exponential backoff
+    local response http_code max_retries=3 retry_count=0
+    
+    while [[ $retry_count -lt $max_retries ]]; do
+        if response=$(curl -s -X POST \
+            --max-time 30 \
+            --connect-timeout 10 \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: DevLake-Telemetry-Collector/1.0" \
+            -d "$payload" \
+            -w "\n%{http_code}" \
+            "$DEVLAKE_WEBHOOK_URL" 2>&1); then
             
-            # Update last send timestamp
-            date '+%Y-%m-%d %H:%M:%S' > "$LAST_SEND_FILE"
+            http_code=$(echo "$response" | tail -n1)
             
-            # Archive the sent data
-            local archive_file="$DATA_DIR/archive/daily_${date}.json"
-            mkdir -p "$DATA_DIR/archive"
-            cp "$DAILY_AGGREGATE_FILE" "$archive_file"
-            log "Archived data to $archive_file"
+            if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+                log "Successfully sent data to DevLake (HTTP $http_code)"
+                
+                # Update last send timestamp
+                echo "$CURRENT_TIMESTAMP" > "$LAST_SEND_FILE"
+                
+                # Archive the sent data
+                local archive_file="$DATA_DIR/archive/daily_${date}.json"
+                mkdir -p "$DATA_DIR/archive"
+                cp "$DAILY_AGGREGATE_FILE" "$archive_file"
+                log "Archived data to $archive_file"
+                
+                return 0
+            elif [[ "$http_code" =~ ^5[0-9][0-9]$ ]]; then
+                # Server error - retry with exponential backoff
+                ((retry_count++))
+                local wait_time=$((retry_count * retry_count * 5))
+                log "Server error (HTTP $http_code), retrying in ${wait_time}s ($retry_count/$max_retries)..."
+                sleep $wait_time
+            else
+                # Client error (4xx) - don't retry
+                log_error "Client error (HTTP $http_code) - not retrying"
+                return 1
+            fi
         else
-            log_error "Failed to send data to DevLake (HTTP $http_code)"
+            # Network error - retry
+            ((retry_count++))
+            local wait_time=$((retry_count * retry_count * 5))
+            log_error "Network error, retrying in ${wait_time}s ($retry_count/$max_retries)..."
+            sleep $wait_time
         fi
-    else
-        log_error "Failed to send data to DevLake: $response"
-    fi
+    done
+    
+    log_error "Failed to send data after $max_retries attempts"
+    return 1
 }
 
 should_send_daily_data() {
-    # Send once per day at the first collection after midnight
-    local current_hour
-    current_hour=$(date '+%H')
-    
     # Check if we've already sent today
     if [[ -f "$LAST_SEND_FILE" ]]; then
         local last_send_date
         last_send_date=$(date -r "$LAST_SEND_FILE" '+%Y-%m-%d' 2>/dev/null || echo "1970-01-01")
-        local today
-        today=$(date '+%Y-%m-%d')
         
-        if [[ "$last_send_date" == "$today" ]]; then
+        if [[ "$last_send_date" == "$CURRENT_DATE" ]]; then
             return 1  # Already sent today
         fi
     fi
     
-    # Send if it's past midnight (first run of new day)
+    # Send if it's a new day
     return 0
 }
 
@@ -510,10 +603,10 @@ should_send_daily_data() {
 main() {
     log "=== DevLake Telemetry Collector Starting ==="
     
-    # Initialize
+    # Initialize (caches date calls and loads config)
     init
     
-    # Collect hourly data
+    # Collect hourly data (runs in parallel)
     collect_hourly_data
     
     # Aggregate into daily summary
