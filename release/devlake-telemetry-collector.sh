@@ -115,11 +115,31 @@ collect_shell_commands() {
     local temp_cmds="/tmp/devlake_cmds_$$"
     : > "$temp_cmds"
     
+    # Timestamp tracking file
+    local timestamp_file="$DATA_DIR/last_history_timestamp"
+    local last_timestamp=0
+    
+    # Load last processed timestamp
+    if [[ -f "$timestamp_file" ]]; then
+        last_timestamp=$(cat "$timestamp_file")
+    fi
+    
+    # Current timestamp (will be saved after processing)
+    local current_timestamp
+    current_timestamp=$(date +%s)
+    
     # Check zsh history
     if [[ -f "$user_home/.zsh_history" ]]; then
         # Extract commands from zsh history (format: : timestamp:0;command)
-        tail -n 1000 "$user_home/.zsh_history" 2>/dev/null | \
-            grep -E "^: [0-9]+:[0-9]+;" | \
+        # Only process entries newer than last_timestamp
+        grep -E "^: [0-9]+:[0-9]+;" "$user_home/.zsh_history" 2>/dev/null | \
+            awk -v last="$last_timestamp" '
+                {
+                    # Extract timestamp from ": 1234567890:0;command"
+                    match($0, /^: ([0-9]+):/, ts);
+                    if (ts[1] > last) print $0;
+                }
+            ' | \
             sed -E 's/^: [0-9]+:[0-9]+;//' | \
             awk '{print $1}' | \
             sed 's/^sudo //' | \
@@ -131,7 +151,8 @@ collect_shell_commands() {
             grep -v "\[" | \
             grep -v "\]" | \
             grep -v "=" | \
-            grep -v "\.objects\." | \
+            grep -v "\." | \
+            grep -v ":" | \
             grep -v "^print" | \
             grep -v "^from" | \
             grep -v "^import" | \
@@ -142,31 +163,44 @@ collect_shell_commands() {
             grep -v "^except" | \
             grep -v "^with" | \
             grep -v "^User" | \
-            grep -v "^content" >> "$temp_cmds" || true
+            grep -v "^content" | \
+            grep -v "^Registration" | \
+            grep -v "^f$" | \
+            grep -v "^user$" | \
+            grep -v "^reg$" >> "$temp_cmds" || true
     fi
     
     # Check bash history
+    # Bash doesn't have timestamps, so we'll use a simpler approach:
+    # Only process if the file was modified since last run
     if [[ -f "$user_home/.bash_history" ]]; then
-        tail -n 1000 "$user_home/.bash_history" 2>/dev/null | \
-            awk '{print $1}' | \
-            sed 's/^sudo //' | \
-            grep -v '^$' | \
-            grep -v '^#' | \
-            grep -v '^"' | \
-            grep -v "(" | \
-            grep -v ")" | \
-            grep -v "\[" | \
-            grep -v "\]" | \
-            grep -v "=" | \
-            grep -v "^print" | \
-            grep -v "^from" | \
-            grep -v "^import" | \
-            grep -v "^if" | \
-            grep -v "^for" | \
-            grep -v "^while" | \
-            grep -v "^try" | \
-            grep -v "^except" | \
-            grep -v "^with" >> "$temp_cmds" || true
+        local bash_mtime
+        bash_mtime=$(stat -f %m "$user_home/.bash_history" 2>/dev/null || stat -c %Y "$user_home/.bash_history" 2>/dev/null || echo "0")
+        
+        if [[ $bash_mtime -gt $last_timestamp ]]; then
+            tail -n 100 "$user_home/.bash_history" 2>/dev/null | \
+                awk '{print $1}' | \
+                sed 's/^sudo //' | \
+                grep -v '^$' | \
+                grep -v '^#' | \
+                grep -v '^"' | \
+                grep -v "(" | \
+                grep -v ")" | \
+                grep -v "\[" | \
+                grep -v "\]" | \
+                grep -v "=" | \
+                grep -v "\." | \
+                grep -v ":" | \
+                grep -v "^print" | \
+                grep -v "^from" | \
+                grep -v "^import" | \
+                grep -v "^if" | \
+                grep -v "^for" | \
+                grep -v "^while" | \
+                grep -v "^try" | \
+                grep -v "^except" | \
+                grep -v "^with" >> "$temp_cmds" || true
+        fi
     fi
     
     # Count commands and convert to JSON using jq
@@ -179,9 +213,13 @@ collect_shell_commands() {
         echo "{}"
     fi
     
+    # Update timestamp file with current time
+    echo "$current_timestamp" > "$timestamp_file"
+    
     # Cleanup
     rm -f "$temp_cmds"
 }
+
 
 collect_active_tools() {
     local tools=()
