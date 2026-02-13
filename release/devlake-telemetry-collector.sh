@@ -328,74 +328,84 @@ collect_git_activity() {
 }
 
 
-# NEW: Monitor network connections to developer APIs
-collect_api_usage() {
+# NEW: Monitor network connections to developer APIs (DIFFERENTIAL TRACKING)
+# Only counts NEW connections that appear, not existing long-lived ones
+collect_api_connections() {
     local temp_api="/tmp/devlake_api_$$"
+    local state_file="$DATA_DIR/api_connection_state"
     : > "$temp_api"
     
-    # Known developer service domains
-    local -a api_patterns=(
-        "api.github.com:443"
-        "github.com:443"
-        "*.atlassian.net:443"
-        "slack.com:443"
-        "api.slack.com:443"
-        "registry.hub.docker.com:443"
-        "registry-1.docker.io:443"
-        "gitlab.com:443"
-        "bitbucket.org:443"
-        "*.npmjs.org:443"
-        "pypi.org:443"
-        "registry.npmjs.org:443"
-        "api.openai.com:443"
-    )
+    # Get all established HTTPS connections with unique identifier
+    local current_connections
+    current_connections=$(lsof -i TCP:443 -sTCP:ESTABLISHED -n 2>/dev/null | \
+        awk 'NR>1 {print $2":"$9}' 2>/dev/null || echo "")
     
-    # Get all established HTTPS connections
-    local connections
-    connections=$(lsof -i TCP:443 -sTCP:ESTABLISHED -n 2>/dev/null | awk 'NR>1 {print $9}' || echo "")
-    
-    if [[ -z "$connections" ]]; then
+    if [[ -z "$current_connections" ]]; then
+        # No connections - clear state and return empty
+        : > "$state_file"
         echo "{}"
         return
     fi
     
-    # Count connections per service
-    echo "$connections" | while read -r conn; do
-        # Extract hostname from "host:port" or "IP:port"
-        local host
-        host=$(echo "$conn" | cut -d':' -f1 | sed 's/.*->//')
-        
-        # Match against known services
-        case "$host" in
-            *github.com*)
-                echo "github" >> "$temp_api"
-                ;;
-            *atlassian.net*|*jira*)
-                echo "jira" >> "$temp_api"
-                ;;
-            *slack.com*)
-                echo "slack" >> "$temp_api"
-                ;;
-            *docker.io*|*docker.com*)
-                echo "docker-hub" >> "$temp_api"
-                ;;
-            *gitlab.com*)
-                echo "gitlab" >> "$temp_api"
-                ;;
-            *bitbucket.org*)
-                echo "bitbucket" >> "$temp_api"
-                ;;
-            *npmjs.org*)
-                echo "npm-registry" >> "$temp_api"
-                ;;
-            *pypi.org*)
-                echo "pypi" >> "$temp_api"
-                ;;
-            *openai.com*)
-                echo "openai" >> "$temp_api"
-                ;;
-        esac
-    done
+    # Load previous connections state
+    local previous_connections=""
+    if [[ -f "$state_file" ]]; then
+        previous_connections=$(cat "$state_file")
+    fi
+    
+    # Find NEW connections (not in previous state)
+    local new_connections
+    if [[ -z "$previous_connections" ]]; then
+        # First run - all connections are "new"
+        new_connections="$current_connections"
+    else
+        new_connections=$(comm -13 \
+            <(echo "$previous_connections" | sort) \
+            <(echo "$current_connections" | sort))
+    fi
+    
+    # Update state file with current connections
+    echo "$current_connections" > "$state_file"
+    
+    # Count NEW connections per service
+    if [[ -n "$new_connections" ]]; then
+        echo "$new_connections" | while read -r conn; do
+            # Extract hostname from "PID:host:port" or "PID:IP:port"
+            local host
+            host=$(echo "$conn" | cut -d':' -f2)
+            
+            # Match against known services
+            case "$host" in
+                *github.com*)
+                    echo "github" >> "$temp_api"
+                    ;;
+                *atlassian.net*|*jira*)
+                    echo "jira" >> "$temp_api"
+                    ;;
+                *slack.com*)
+                    echo "slack" >> "$temp_api"
+                    ;;
+                *docker.io*|*docker.com*)
+                    echo "docker-hub" >> "$temp_api"
+                    ;;
+                *gitlab.com*)
+                    echo "gitlab" >> "$temp_api"
+                    ;;
+                *bitbucket.org*)
+                    echo "bitbucket" >> "$temp_api"
+                    ;;
+                *npmjs.org*)
+                    echo "npm-registry" >> "$temp_api"
+                    ;;
+                *pypi.org*)
+                    echo "pypi" >> "$temp_api"
+                    ;;
+                *openai.com*)
+                    echo "openai" >> "$temp_api"
+                    ;;
+            esac
+        done
+    fi
     
     # Convert to JSON with counts
     if [[ -s "$temp_api" ]]; then
@@ -409,6 +419,7 @@ collect_api_usage() {
     
     rm -f "$temp_api"
 }
+
 
 collect_active_tools() {
     local tools=()
@@ -505,7 +516,7 @@ collect_hourly_data() {
     collect_git_activity > "$tmp_git" 2>/dev/null &
     local pid_git=$!
     
-    collect_api_usage > "$tmp_api" 2>/dev/null &
+    collect_api_connections > "$tmp_api" 2>/dev/null &
     local pid_api=$!
     
     # Wait for all background jobs to complete
@@ -520,8 +531,8 @@ collect_hourly_data() {
     projects=$(cat "$tmp_proj" 2>/dev/null || echo "[]")
     local git_activity
     git_activity=$(cat "$tmp_git" 2>/dev/null || echo "{}")
-    local api_usage
-    api_usage=$(cat "$tmp_api" 2>/dev/null || echo "{}")
+    local api_connections
+    api_connections=$(cat "$tmp_api" 2>/dev/null || echo "{}")
     
     # Cleanup temp files
     rm -f "$tmp_cmd" "$tmp_tools" "$tmp_proj" "$tmp_git" "$tmp_api"
@@ -550,7 +561,7 @@ collect_hourly_data() {
   "tools_used": $tools,
   "projects": $projects,
   "git_commits": $git_activity,
-  "api_usage": $api_usage
+  "api_connections": $api_connections
 }
 EOF
     
@@ -602,7 +613,7 @@ aggregate_hourly_to_daily() {
             }) | from_entries) as $summed_git |
             
             # Merge API usage (sum connections per service)
-            ($daily.api_usage // {} + $hourly.api_usage // {}) as $merged_api |
+            ($daily.api_connections // {} + $hourly.api_connections // {}) as $merged_api |
             ($merged_api | to_entries | group_by(.key) | map({
                 key: .[0].key,
                 value: (map(.value) | add)
@@ -619,7 +630,7 @@ aggregate_hourly_to_daily() {
             .tools_used = $merged_tools |
             .projects = $merged_projects |
             .git_commits = $summed_git |
-            .api_usage = $summed_api |
+            .api_connections = $summed_api |
             .hours_collected = $updated_hours |
             .active_hours = $updated_active
         ' "$DAILY_AGGREGATE_FILE" "$HOURLY_DATA_FILE" 2>/dev/null) 
