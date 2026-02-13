@@ -180,7 +180,7 @@ get_username() {
     fi
 }
 
-# OPTIMIZED: Consolidated grep chains, safe timestamp handling
+# MULTI-SOURCE: Collect from zsh history, unified logs, and git commits
 collect_shell_commands() {
     local username
     username=$(get_username)
@@ -202,15 +202,13 @@ collect_shell_commands() {
     local timestamp_file="$DATA_DIR/last_history_timestamp"
     local last_timestamp=0
     
-    # OPTIMIZATION: Safe timestamp file handling with flock
+    # Load last processed timestamp
     if [[ -f "$timestamp_file" ]]; then
         last_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "0")
     fi
     
-    # Check zsh history
+    # SOURCE 1: Zsh history (has built-in timestamps) - MOST ACCURATE
     if [[ -f "$user_home/.zsh_history" ]]; then
-        # Extract commands from zsh history (format: : timestamp:0;command)
-        # Only process entries newer than last_timestamp
         grep -E "^: [0-9]+:[0-9]+;" "$user_home/.zsh_history" 2>/dev/null | \
             awk -v last="$last_timestamp" '
                 {
@@ -225,7 +223,31 @@ collect_shell_commands() {
             filter_commands >> "$temp_cmds" || true
     fi
     
-    # Check bash history
+    # SOURCE 2: macOS Unified Logs (command execution tracking) - FALLBACK FOR BASH
+    # Only use if zsh history is empty or we're using bash
+    if [[ ! -s "$temp_cmds" ]] || [[ -f "$user_home/.bash_history" ]]; then
+        # Calculate time range (since last run)
+        local time_range="1h"
+        if [[ $last_timestamp -gt 0 ]]; then
+            local time_diff=$((CURRENT_EPOCH - last_timestamp))
+            if [[ $time_diff -lt 3600 ]]; then
+                time_range="${time_diff}s"
+            fi
+        fi
+        
+        # Extract shell commands from unified logs (requires no special permissions for own processes)
+        log show --predicate 'process == "bash" || process == "zsh" || process == "sh"' \
+            --style compact \
+            --last "$time_range" 2>/dev/null | \
+            grep -E "^[0-9]" | \
+            awk '{for(i=5;i<=NF;i++) printf "%s ", $i; print ""}' | \
+            grep -v "^$" | \
+            awk '{print $1}' | \
+            sed 's/^sudo //' | \
+            filter_commands >> "$temp_cmds" || true
+    fi
+    
+    # SOURCE 3: Bash history with file mtime check (FALLBACK)
     if [[ -f "$user_home/.bash_history" ]]; then
         local bash_mtime
         bash_mtime=$(stat -f %m "$user_home/.bash_history" 2>/dev/null || stat -c %Y "$user_home/.bash_history" 2>/dev/null || echo "0")
@@ -249,7 +271,7 @@ collect_shell_commands() {
         result="{}"
     fi
     
-    # OPTIMIZATION: Safe timestamp update with flock
+    # Update timestamp file
     (
         flock -x 200
         echo "$CURRENT_EPOCH" > "$timestamp_file"
@@ -260,6 +282,51 @@ collect_shell_commands() {
     
     echo "$result"
 }
+
+# NEW: Collect git commit activity for project validation
+collect_git_activity() {
+    local username
+    username=$(get_username)
+    local user_home
+    user_home=$(get_user_home "$username")
+    
+    if [[ -z "$user_home" ]] || [[ ! -d "$user_home" ]]; then
+        echo "{}"
+        return
+    fi
+    
+    local temp_activity="/tmp/devlake_git_$$"
+    : > "$temp_activity"
+    
+    # Find git repositories and check for recent commits
+    while IFS= read -r git_dir; do
+        [[ -z "$git_dir" ]] && continue
+        
+        local repo_dir
+        repo_dir=$(dirname "$git_dir")
+        local repo_name
+        repo_name=$(basename "$repo_dir")
+        
+        # Check for commits in the last hour
+        if git -C "$repo_dir" log --all --since="1 hour ago" --oneline 2>/dev/null | grep -q .; then
+            local commit_count
+            commit_count=$(git -C "$repo_dir" log --all --since="1 hour ago" --oneline 2>/dev/null | wc -l | tr -d ' ')
+            echo "$repo_name\t$commit_count" >> "$temp_activity"
+        fi
+    done < <(find "$user_home" -type d -name ".git" -maxdepth 4 2>/dev/null || true)
+    
+    # Convert to JSON
+    if [[ -s "$temp_activity" ]]; then
+        sort "$temp_activity" | \
+            jq -R 'split("\t") | {(.[0]): (.[1] | tonumber)}' | \
+            jq -s 'add // {}'
+    else
+        echo "{}"
+    fi
+    
+    rm -f "$temp_activity"
+}
+
 
 # OPTIMIZED: Single ps call instead of multiple pgrep calls
 collect_active_tools() {
@@ -341,6 +408,7 @@ collect_hourly_data() {
     local tmp_cmd="$DATA_DIR/tmp_cmd_$$"
     local tmp_tools="$DATA_DIR/tmp_tools_$$"
     local tmp_proj="$DATA_DIR/tmp_proj_$$"
+    local tmp_git="$DATA_DIR/tmp_git_$$"
     
     # Run collections in parallel
     collect_shell_commands > "$tmp_cmd" 2>/dev/null &
@@ -352,8 +420,11 @@ collect_hourly_data() {
     collect_active_projects > "$tmp_proj" 2>/dev/null &
     local pid_proj=$!
     
+    collect_git_activity > "$tmp_git" 2>/dev/null &
+    local pid_git=$!
+    
     # Wait for all background jobs to complete
-    wait $pid_cmd $pid_tools $pid_proj 2>/dev/null || true
+    wait $pid_cmd $pid_tools $pid_proj $pid_git 2>/dev/null || true
     
     # Read results
     local commands
@@ -362,9 +433,11 @@ collect_hourly_data() {
     tools=$(cat "$tmp_tools" 2>/dev/null || echo "[]")
     local projects
     projects=$(cat "$tmp_proj" 2>/dev/null || echo "[]")
+    local git_activity
+    git_activity=$(cat "$tmp_git" 2>/dev/null || echo "{}")
     
     # Cleanup temp files
-    rm -f "$tmp_cmd" "$tmp_tools" "$tmp_proj"
+    rm -f "$tmp_cmd" "$tmp_tools" "$tmp_proj" "$tmp_git"
     
     # Determine if this hour counts as "active"
     local is_active=false
@@ -372,8 +445,11 @@ collect_hourly_data() {
     cmd_count=$(echo "$commands" | jq 'keys | length' 2>/dev/null || echo "0")
     local project_count
     project_count=$(echo "$projects" | jq 'length' 2>/dev/null || echo "0")
+    local git_count
+    git_count=$(echo "$git_activity" | jq 'keys | length' 2>/dev/null || echo "0")
     
-    if [[ $cmd_count -gt 0 ]] || [[ $project_count -gt 0 ]]; then
+    # Active if: commands executed OR project files modified OR commits made
+    if [[ $cmd_count -gt 0 ]] || [[ $project_count -gt 0 ]] || [[ $git_count -gt 0 ]]; then
         is_active=true
     fi
     
@@ -385,7 +461,8 @@ collect_hourly_data() {
   "is_active": $is_active,
   "commands": $commands,
   "tools_used": $tools,
-  "projects": $projects
+  "projects": $projects,
+  "git_commits": $git_activity
 }
 EOF
     
@@ -429,6 +506,13 @@ aggregate_hourly_to_daily() {
             # Merge projects (unique)
             (($daily.projects + $hourly.projects) | unique) as $merged_projects |
             
+            # Merge git commits (sum counts per repo)
+            ($daily.git_commits // {} + $hourly.git_commits // {}) as $merged_git |
+            ($merged_git | to_entries | group_by(.key) | map({
+                key: .[0].key,
+                value: (map(.value) | add)
+            }) | from_entries) as $summed_git |
+            
             # Add hour to collected hours
             ($daily.hours_collected + [$hourly.hour]) as $updated_hours |
             
@@ -439,6 +523,7 @@ aggregate_hourly_to_daily() {
             .commands = $summed_cmds |
             .tools_used = $merged_tools |
             .projects = $merged_projects |
+            .git_commits = $summed_git |
             .hours_collected = $updated_hours |
             .active_hours = $updated_active
         ' "$DAILY_AGGREGATE_FILE" "$HOURLY_DATA_FILE" 2>/dev/null) 
