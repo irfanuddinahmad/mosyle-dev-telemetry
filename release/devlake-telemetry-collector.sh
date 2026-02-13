@@ -42,13 +42,13 @@ HOURLY_DATA_FILE="$DATA_DIR/hourly_data.json"
 DAILY_AGGREGATE_FILE="$DATA_DIR/daily_aggregate.json"
 LAST_SEND_FILE="$DATA_DIR/last_send_timestamp"
 
-# Cache variables
-declare -g CONFIG_LOADED=0
-declare -g CACHED_WEBHOOK_URL=""
-declare -g CURRENT_DATE=""
-declare -g CURRENT_HOUR=""
-declare -g CURRENT_TIMESTAMP=""
-declare -g CURRENT_EPOCH=""
+# Cache variables (Bash 3.2 compatible - no -g flag needed at top level)
+CONFIG_LOADED=0
+CACHED_WEBHOOK_URL=""
+CURRENT_DATE=""
+CURRENT_HOUR=""
+CURRENT_TIMESTAMP=""
+CURRENT_EPOCH=""
 
 # ============================================================================
 # Logging
