@@ -215,7 +215,10 @@ Data is processed entirely on the local machine to ensure privacy and reduce net
 - **Trigger**: First run after midnight (checked via timestamp comparison)
 - **Duplicate Prevention**: Checks `last_send_timestamp` to avoid sending twice
 - **Payload**: Constructs JSON from `daily_aggregate.json`
-- **Sending**:
+- **Secondary Webhook (Optional Testing)**:
+  - If `DEVLAKE_WEBHOOK_URL_SECONDARY` is configured, tries to send payload there first.
+  - **Fire-and-Forget**: Failures here are logged but ignored; they do *not* prevent primary transmission.
+- **Primary Sending**:
   - POST request to DevLake Webhook: `/api/plugins/developer-telemetry/1/report`
   - **Headers**: `Authorization: Bearer <token>`, `Content-Type: application/json`
   - **Retry Logic**: 

@@ -80,8 +80,14 @@ load_config() {
             webhook_url=$(jq -r '.webhook_url // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
             if [[ -n "$webhook_url" ]]; then
                 DEVLAKE_WEBHOOK_URL="$webhook_url"
-                CACHED_WEBHOOK_URL="$webhook_url"
             fi
+            
+            # Load optional secondary webhook (for testing)
+            local webhook_url_secondary=""
+            if webhook_url_secondary=$(awk -F= '/^DEVLAKE_WEBHOOK_URL_SECONDARY=/{print $2}' "$CONFIG_FILE" 2>/dev/null) && [[ -n "$webhook_url_secondary" ]]; then
+                DEVLAKE_WEBHOOK_URL_SECONDARY="$webhook_url_secondary"
+            fi
+            CACHED_WEBHOOK_URL="$webhook_url"
         fi
     fi
     
@@ -688,6 +694,23 @@ send_daily_data() {
             projects: .projects
         }
     }')
+    
+    # OPTIONAL: Send to secondary webhook first (for testing/backup)
+    # This is "fire-and-forget" - failure here does NOT stop the main flow
+    if [[ -n "${DEVLAKE_WEBHOOK_URL_SECONDARY:-}" ]]; then
+        log "Sending payload to secondary webhook: $DEVLAKE_WEBHOOK_URL_SECONDARY"
+        if curl -s -X POST \
+            --max-time 10 \
+            --connect-timeout 5 \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: DevLake-Telemetry-Collector/1.0" \
+            -d "$payload" \
+            "$DEVLAKE_WEBHOOK_URL_SECONDARY" >/dev/null 2>&1; then
+            log "Successfully sent data to secondary webhook"
+        else
+            log_warn "Failed to send data to secondary webhook (continuing with primary)"
+        fi
+    fi
     
     log "Sending payload to $DEVLAKE_WEBHOOK_URL"
     
