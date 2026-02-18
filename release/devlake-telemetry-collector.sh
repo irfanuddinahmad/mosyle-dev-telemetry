@@ -83,8 +83,9 @@ load_config() {
             fi
             
             # Load optional secondary webhook (for testing)
-            local webhook_url_secondary=""
-            if webhook_url_secondary=$(awk -F= '/^DEVLAKE_WEBHOOK_URL_SECONDARY=/{print $2}' "$CONFIG_FILE" 2>/dev/null) && [[ -n "$webhook_url_secondary" ]]; then
+            local webhook_url_secondary
+            webhook_url_secondary=$(jq -r '.webhook_url_secondary // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+            if [[ -n "$webhook_url_secondary" ]]; then
                 DEVLAKE_WEBHOOK_URL_SECONDARY="$webhook_url_secondary"
             fi
             CACHED_WEBHOOK_URL="$webhook_url"
