@@ -24,7 +24,7 @@ Created a local testing installation script that installs the telemetry collecto
 ```json
 {
   "webhook_url": "http://localhost:8080/plugins/developer_telemetry/connections/1/report",
-  "webhook_url_secondary": "https://webhook.site/04421308-e750-4ead-901c-f5bf32292fd4"
+  "webhook_url_secondary": "https://webhook.site/YOUR-UNIQUE-UUID-HERE"
 }
 ```
 
@@ -56,7 +56,7 @@ Created a local testing installation script that installs the telemetry collecto
 ### Test Output
 ```
 [2026-02-18 08:01:49] === DevLake Telemetry Collector Starting ===
-[2026-02-18 08:01:49] Sending payload to secondary webhook: https://webhook.site/04421308-e750-4ead-901c-f5bf32292fd4
+[2026-02-18 08:01:49] Sending payload to secondary webhook: https://webhook.site/YOUR-UNIQUE-UUID-HERE
 [2026-02-18 08:01:50] Successfully sent data to secondary webhook
 [2026-02-18 08:01:50] Sending payload to http://localhost:8080/plugins/developer_telemetry/connections/1/report
 [2026-02-18 08:01:50] Successfully sent data to DevLake (HTTP 200)

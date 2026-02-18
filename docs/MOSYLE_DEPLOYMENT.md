@@ -20,7 +20,7 @@ Complete guide for deploying the DevLake Telemetry Collector via Mosyle Custom C
 
 ### Step 1: Prepare Configuration
 
-1. **Edit the webhook URL** in [`config.json`](file:///Users/irfan.ahmad/mosyle-dev-telemetry/config.json):
+1. **Edit the webhook URL** in `config.json`:
 
 ```json
 {

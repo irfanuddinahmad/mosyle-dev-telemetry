@@ -139,7 +139,7 @@ else
     cat > "$CONFIG_PATH" << 'EOF'
 {
   "webhook_url": "http://localhost:8080/plugins/developer_telemetry/connections/1/report",
-  "webhook_url_secondary": "https://webhook.site/04421308-e750-4ead-901c-f5bf32292fd4",
+  "webhook_url_secondary": "https://webhook.site/YOUR-UNIQUE-UUID-HERE",
   "collection_interval_seconds": 3600,
   "data_retention_days": 30,
   "privacy": {
@@ -215,7 +215,7 @@ echo ""
 echo "The telemetry collector is now installed and will:"
 echo "  • Collect data every hour"
 echo "  • Send to Primary URL: http://localhost:8080/plugins/developer_telemetry/connections/1/report"
-echo "  • Send to Secondary URL: https://webhook.site/04421308-e750-4ead-901c-f5bf32292fd4"
+echo "  • Send to Secondary URL: https://webhook.site/YOUR-UNIQUE-UUID-HERE"
 echo "  • Run automatically on user login"
 echo ""
 echo "Configuration: $CONFIG_PATH"

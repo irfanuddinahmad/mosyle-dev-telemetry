@@ -47,11 +47,11 @@ graph LR
 
 ## 📦 Components
 
-- [`devlake-telemetry-collector.sh`](file:///Users/irfan.ahmad/mosyle-dev-telemetry/devlake-telemetry-collector.sh) - Main collection script
-- [`com.devlake.telemetry.plist`](file:///Users/irfan.ahmad/mosyle-dev-telemetry/com.devlake.telemetry.plist) - LaunchDaemon configuration
-- [`config.json`](file:///Users/irfan.ahmad/mosyle-dev-telemetry/config.json) - Configuration file
-- [`install-telemetry.sh`](file:///Users/irfan.ahmad/mosyle-dev-telemetry/install-telemetry.sh) - Installation script
-- [`uninstall-telemetry.sh`](file:///Users/irfan.ahmad/mosyle-dev-telemetry/uninstall-telemetry.sh) - Uninstallation script
+- `devlake-telemetry-collector.sh` - Main collection script
+- `com.devlake.telemetry.plist` - LaunchDaemon configuration
+- `config.json` - Configuration file
+- `install-telemetry.sh` - Installation script
+- `uninstall-telemetry.sh` - Uninstallation script
 
 ## 🚀 Installation
 
