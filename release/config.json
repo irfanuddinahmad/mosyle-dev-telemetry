@@ -1,5 +1,6 @@
 {
-  "webhook_url": "https://your-devlake-instance.com/api/webhooks/your-id",
+  "webhook_url": "http://localhost:8080/rest/plugins/developer_telemetry/connections/4/report",
+  "api_key": "jHxXMzoYIy4wej2WEL58hKzSCZBQGWutYF99bfBplAnDpiQEt7z3GBnEAwWaXyOwHFYTRzLnq5IiPsbCQWnuzZwYvkDIyT9M6oGmvKLjC2YPnb1oyZNl2Yr7ul3hFEjA",
   "collection_interval_seconds": 3600,
   "data_retention_days": 30,
   "privacy": {

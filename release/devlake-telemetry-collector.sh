@@ -45,6 +45,7 @@ LAST_SEND_FILE="$DATA_DIR/last_send_timestamp"
 # Cache variables (Bash 3.2 compatible - no -g flag needed at top level)
 CONFIG_LOADED=0
 CACHED_WEBHOOK_URL=""
+CACHED_API_KEY=""
 CURRENT_DATE=""
 CURRENT_HOUR=""
 CURRENT_TIMESTAMP=""
@@ -70,6 +71,7 @@ load_config() {
     # Return cached value if already loaded
     if [[ $CONFIG_LOADED -eq 1 ]]; then
         [[ -n "$CACHED_WEBHOOK_URL" ]] && DEVLAKE_WEBHOOK_URL="$CACHED_WEBHOOK_URL"
+        [[ -n "$CACHED_API_KEY" ]] && DEVLAKE_API_KEY="$CACHED_API_KEY"
         return
     fi
     
@@ -82,6 +84,13 @@ load_config() {
                 DEVLAKE_WEBHOOK_URL="$webhook_url"
             fi
             
+            # Load API key from config if available
+            local api_key
+            api_key=$(jq -r '.api_key // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+            if [[ -n "$api_key" ]]; then
+                DEVLAKE_API_KEY="$api_key"
+            fi
+            
             # Load optional secondary webhook (for testing)
             local webhook_url_secondary
             webhook_url_secondary=$(jq -r '.webhook_url_secondary // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
@@ -89,6 +98,7 @@ load_config() {
                 DEVLAKE_WEBHOOK_URL_SECONDARY="$webhook_url_secondary"
             fi
             CACHED_WEBHOOK_URL="$webhook_url"
+            CACHED_API_KEY="$api_key"
         fi
     fi
     
@@ -700,11 +710,19 @@ send_daily_data() {
     # This is "fire-and-forget" - failure here does NOT stop the main flow
     if [[ -n "${DEVLAKE_WEBHOOK_URL_SECONDARY:-}" ]]; then
         log "Sending payload to secondary webhook: $DEVLAKE_WEBHOOK_URL_SECONDARY"
+        
+        # Prepare headers for secondary webhook
+        local secondary_headers=()
+        secondary_headers+=(-H "Content-Type: application/json")
+        secondary_headers+=(-H "User-Agent: DevLake-Telemetry-Collector/1.0")
+        if [[ -n "${DEVLAKE_API_KEY:-}" ]]; then
+            secondary_headers+=(-H "Authorization: Bearer $DEVLAKE_API_KEY")
+        fi
+        
         if curl -s -X POST \
             --max-time 10 \
             --connect-timeout 5 \
-            -H "Content-Type: application/json" \
-            -H "User-Agent: DevLake-Telemetry-Collector/1.0" \
+            "${secondary_headers[@]}" \
             -d "$payload" \
             "$DEVLAKE_WEBHOOK_URL_SECONDARY" >/dev/null 2>&1; then
             log "Successfully sent data to secondary webhook"
@@ -715,6 +733,15 @@ send_daily_data() {
     
     log "Sending payload to $DEVLAKE_WEBHOOK_URL"
     
+    # Prepare headers for primary webhook
+    local curl_headers=()
+    curl_headers+=(-H "Content-Type: application/json")
+    curl_headers+=(-H "User-Agent: DevLake-Telemetry-Collector/1.0")
+    if [[ -n "${DEVLAKE_API_KEY:-}" ]]; then
+        curl_headers+=(-H "Authorization: Bearer $DEVLAKE_API_KEY")
+        log "Using API key authentication"
+    fi
+    
     # OPTIMIZATION: Send with timeout, retries, and exponential backoff
     local response http_code max_retries=3 retry_count=0
     
@@ -722,8 +749,7 @@ send_daily_data() {
         if response=$(curl -s -X POST \
             --max-time 30 \
             --connect-timeout 10 \
-            -H "Content-Type: application/json" \
-            -H "User-Agent: DevLake-Telemetry-Collector/1.0" \
+            "${curl_headers[@]}" \
             -d "$payload" \
             -w "\n%{http_code}" \
             "$DEVLAKE_WEBHOOK_URL" 2>&1); then
