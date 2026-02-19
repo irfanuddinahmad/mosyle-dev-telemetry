@@ -324,7 +324,8 @@ collect_git_activity() {
         repo_name=$(basename "$repo_dir")
         
         # Build git log command with optional author filter
-        local git_log_cmd="git -C '$repo_dir' log --all --since='yesterday'"
+        # Use current date at midnight to only capture today's commits
+        local git_log_cmd="git -C '$repo_dir' log --all --since='$CURRENT_DATE 00:00:00'"
         if [[ -n "$git_email" ]]; then
             git_log_cmd="$git_log_cmd --author='$git_email'"
         fi
