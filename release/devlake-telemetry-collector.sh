@@ -314,6 +314,13 @@ collect_git_activity() {
     local total_lines_deleted=0
     local total_files_changed=0
     
+    # Calculate previous hour boundary for time-bounded query
+    local previous_hour
+    previous_hour=$((CURRENT_HOUR - 1))
+    if [[ $previous_hour -lt 0 ]]; then
+        previous_hour=23
+    fi
+    
     # Find git repositories and collect activity
     while IFS= read -r git_dir; do
         [[ -z "$git_dir" ]] && continue
@@ -323,9 +330,10 @@ collect_git_activity() {
         local repo_name
         repo_name=$(basename "$repo_dir")
         
-        # Build git log command with optional author filter
-        # Use current date at midnight to only capture today's commits
-        local git_log_cmd="git -C '$repo_dir' log --all --since='$CURRENT_DATE 00:00:00'"
+        # Build git log command with hourly time boundaries
+        # CRITICAL: Only collect commits from the PAST HOUR to prevent duplication
+        # Each hour gets distinct commits, safe to sum in aggregation
+        local git_log_cmd="git -C '$repo_dir' log --all --since='1 hour ago'"
         if [[ -n "$git_email" ]]; then
             git_log_cmd="$git_log_cmd --author='$git_email'"
         fi
