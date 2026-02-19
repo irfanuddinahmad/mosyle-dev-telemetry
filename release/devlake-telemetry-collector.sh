@@ -124,7 +124,7 @@ init() {
     
     # Initialize daily aggregate if it doesn't exist or if it's a new day
     if [[ ! -f "$DAILY_AGGREGATE_FILE" ]]; then
-        echo '{"date":"'"$CURRENT_DATE"'","hours_collected":[],"commands":{},"tools_used":[],"projects":[],"builds":{},"active_hours":0}' > "$DAILY_AGGREGATE_FILE"
+        echo '{"date":"'"$CURRENT_DATE"'","hours_collected":[],"tools_used":[],"projects":[],"git_activity":{"total_commits":0,"total_lines_added":0,"total_lines_deleted":0,"total_files_changed":0,"repositories":[]},"development_activity":{"test_runs_detected":0,"build_commands_detected":0},"api_connections":{},"active_hours":0}' > "$DAILY_AGGREGATE_FILE"
     else
         # Check if we need to reset for a new day
         local stored_date
@@ -132,7 +132,7 @@ init() {
         if [[ "$stored_date" != "$CURRENT_DATE" ]]; then
             # New day - send previous day's data first, then reset
             send_daily_data
-            echo '{"date":"'"$CURRENT_DATE"'","hours_collected":[],"commands":{},"tools_used":[],"projects":[],"builds":{},"active_hours":0}' > "$DAILY_AGGREGATE_FILE"
+            echo '{"date":"'"$CURRENT_DATE"'","hours_collected":[],"tools_used":[],"projects":[],"git_activity":{"total_commits":0,"total_lines_added":0,"total_lines_deleted":0,"total_files_changed":0,"repositories":[]},"development_activity":{"test_runs_detected":0,"build_commands_detected":0},"api_connections":{},"active_hours":0}' > "$DAILY_AGGREGATE_FILE"
         fi
     fi
 }
@@ -197,8 +197,8 @@ get_username() {
     fi
 }
 
-# MULTI-SOURCE: Collect from zsh history, unified logs, and git commits
-collect_shell_commands() {
+# Pattern-based terminal analysis - extract development activity patterns only
+collect_development_activity() {
     local username
     username=$(get_username)
     local user_home
@@ -207,13 +207,9 @@ collect_shell_commands() {
     # Validate home directory
     if [[ -z "$user_home" ]] || [[ ! -d "$user_home" ]]; then
         log_error "Could not determine home directory for $username"
-        echo "{}"
+        echo '{"test_runs_detected":0,"build_commands_detected":0}'
         return
     fi
-    
-    # Temporary file to store commands
-    local temp_cmds="/tmp/devlake_cmds_$$"
-    : > "$temp_cmds"
     
     # Timestamp tracking file
     local timestamp_file="$DATA_DIR/last_history_timestamp"
@@ -224,83 +220,73 @@ collect_shell_commands() {
         last_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "0")
     fi
     
-    # SOURCE 1: Zsh history (has built-in timestamps) - MOST ACCURATE
-    if [[ -f "$user_home/.zsh_history" ]]; then
-        grep -E "^: [0-9]+:[0-9]+;" "$user_home/.zsh_history" 2>/dev/null | \
+    # Calculate time range (since last run)
+    local time_range="1h"
+    if [[ $last_timestamp -gt 0 ]]; then
+        local time_diff=$((CURRENT_EPOCH - last_timestamp))
+        if [[ $time_diff -lt 3600 ]]; then
+            time_range="${time_diff}s"
+        fi
+    fi
+    
+    local test_runs=0
+    local build_commands=0
+    
+    # Extract test patterns from unified logs
+    local test_patterns="pytest|npm test|npm run test|go test|jest|make test|python -m pytest|python -m unittest"
+    test_runs=$(log show --predicate 'process == "bash" || process == "zsh" || process == "sh"' \
+        --style compact \
+        --last "$time_range" 2>/dev/null | \
+        grep -iE "($test_patterns)" | \
+        wc -l | tr -d ' ' || echo "0")
+    
+    # Extract build patterns from unified logs
+    local build_patterns="docker build|npm run build|npm build|make build|go build|gradle build|mvn package|mvn install"
+    build_commands=$(log show --predicate 'process == "bash" || process == "zsh" || process == "sh"' \
+        --style compact \
+        --last "$time_range" 2>/dev/null | \
+        grep -iE "($build_patterns)" | \
+        wc -l | tr -d ' ' || echo "0")
+    
+    # Also check shell history files for patterns (if we got no hits from log show)
+    if [[ $test_runs -eq 0 ]] && [[ $build_commands -eq 0 ]] && [[ -f "$user_home/.zsh_history" ]]; then
+        local zsh_test_count
+        zsh_test_count=$(grep -E "^: [0-9]+:[0-9]+;" "$user_home/.zsh_history" 2>/dev/null | \
             awk -v last="$last_timestamp" '
                 {
-                    # Extract timestamp from ": 1234567890:0;command"
                     match($0, /^: ([0-9]+):/, ts);
                     if (ts[1] > last) print $0;
                 }
-            ' | \
-            sed -E 's/^: [0-9]+:[0-9]+;//' | \
-            awk '{print $1}' | \
-            sed 's/^sudo //' | \
-            filter_commands >> "$temp_cmds" || true
-    fi
-    
-    # SOURCE 2: macOS Unified Logs (command execution tracking) - FALLBACK FOR BASH
-    # Only use if zsh history is empty or we're using bash
-    if [[ ! -s "$temp_cmds" ]] || [[ -f "$user_home/.bash_history" ]]; then
-        # Calculate time range (since last run)
-        local time_range="1h"
-        if [[ $last_timestamp -gt 0 ]]; then
-            local time_diff=$((CURRENT_EPOCH - last_timestamp))
-            if [[ $time_diff -lt 3600 ]]; then
-                time_range="${time_diff}s"
-            fi
-        fi
+            ' 2>/dev/null | \
+            grep -iE "($test_patterns)" 2>/dev/null | \
+            wc -l 2>/dev/null | tr -d ' ' || echo "0")
+        test_runs=$((test_runs + zsh_test_count))
         
-        # Extract shell commands from unified logs (requires no special permissions for own processes)
-        log show --predicate 'process == "bash" || process == "zsh" || process == "sh"' \
-            --style compact \
-            --last "$time_range" 2>/dev/null | \
-            grep -E "^[0-9]" | \
-            awk '{for(i=5;i<=NF;i++) printf "%s ", $i; print ""}' | \
-            grep -v "^$" | \
-            awk '{print $1}' | \
-            sed 's/^sudo //' | \
-            filter_commands >> "$temp_cmds" || true
-    fi
-    
-    # SOURCE 3: Bash history with file mtime check (FALLBACK)
-    if [[ -f "$user_home/.bash_history" ]]; then
-        local bash_mtime
-        bash_mtime=$(stat -f %m "$user_home/.bash_history" 2>/dev/null || stat -c %Y "$user_home/.bash_history" 2>/dev/null || echo "0")
-        
-        if [[ $bash_mtime -gt $last_timestamp ]]; then
-            tail -n 100 "$user_home/.bash_history" 2>/dev/null | \
-                awk '{print $1}' | \
-                sed 's/^sudo //' | \
-                filter_commands >> "$temp_cmds" || true
-        fi
-    fi
-    
-    # Count commands and convert to JSON using jq
-    local result
-    if [[ -s "$temp_cmds" ]]; then
-        result=$(sort "$temp_cmds" | uniq -c | \
-            awk '{print $2 "\t" $1}' | \
-            jq -R 'split("\t") | {(.[0]): (.[1] | tonumber)}' | \
-            jq -s 'add // {}')
-    else
-        result="{}"
+        local zsh_build_count
+        zsh_build_count=$(grep -E "^: [0-9]+:[0-9]+;" "$user_home/.zsh_history" 2>/dev/null | \
+            awk -v last="$last_timestamp" '
+                {
+                    match($0, /^: ([0-9]+):/, ts);
+                    if (ts[1] > last) print $0;
+                }
+            ' 2>/dev/null | \
+            grep -iE "($build_patterns)" 2>/dev/null | \
+            wc -l 2>/dev/null | tr -d ' ' || echo "0")
+        build_commands=$((build_commands + zsh_build_count))
     fi
     
     # Update timestamp file
+    mkdir -p "$(dirname "$timestamp_file")" 2>/dev/null || true
     (
         flock -x 200
         echo "$CURRENT_EPOCH" > "$timestamp_file"
     ) 200>"$timestamp_file.lock" 2>/dev/null || echo "$CURRENT_EPOCH" > "$timestamp_file"
     
-    # Cleanup
-    rm -f "$temp_cmds"
-    
-    echo "$result"
+    # Ensure we always return valid JSON
+    printf '{"test_runs_detected":%d,"build_commands_detected":%d}\n' "$test_runs" "$build_commands"
 }
 
-# NEW: Collect git commit activity for project validation
+# Collect comprehensive git activity with code churn metrics
 collect_git_activity() {
     local username
     username=$(get_username)
@@ -308,14 +294,27 @@ collect_git_activity() {
     user_home=$(get_user_home "$username")
     
     if [[ -z "$user_home" ]] || [[ ! -d "$user_home" ]]; then
-        echo "{}"
+        echo '{"total_commits":0,"total_lines_added":0,"total_lines_deleted":0,"total_files_changed":0,"repositories":[]}'
         return
     fi
     
-    local temp_activity="/tmp/devlake_git_$$"
-    : > "$temp_activity"
+    # Get git email for filtering commits
+    local git_email
+    git_email=$(git config --global user.email 2>/dev/null || echo "")
     
-    # Find git repositories and check for recent commits
+    if [[ -z "$git_email" ]]; then
+        log "No git email configured, using all commits"
+    fi
+    
+    local temp_repos="/tmp/devlake_git_repos_$$"
+    : > "$temp_repos"
+    
+    local total_commits=0
+    local total_lines_added=0
+    local total_lines_deleted=0
+    local total_files_changed=0
+    
+    # Find git repositories and collect activity
     while IFS= read -r git_dir; do
         [[ -z "$git_dir" ]] && continue
         
@@ -324,24 +323,103 @@ collect_git_activity() {
         local repo_name
         repo_name=$(basename "$repo_dir")
         
-        # Check for commits in the last hour
-        if git -C "$repo_dir" log --all --since="1 hour ago" --oneline 2>/dev/null | grep -q .; then
-            local commit_count
-            commit_count=$(git -C "$repo_dir" log --all --since="1 hour ago" --oneline 2>/dev/null | wc -l | tr -d ' ')
-            echo "$repo_name\t$commit_count" >> "$temp_activity"
+        # Build git log command with optional author filter
+        local git_log_cmd="git -C '$repo_dir' log --all --since='yesterday'"
+        if [[ -n "$git_email" ]]; then
+            git_log_cmd="$git_log_cmd --author='$git_email'"
+        fi
+        
+        # Check for commits
+        local commit_count
+        commit_count=$(eval "$git_log_cmd --oneline 2>/dev/null" | wc -l | tr -d ' ' || echo "0")
+        
+        if [[ $commit_count -gt 0 ]]; then
+            # Get code churn statistics
+            local lines_added=0
+            local lines_deleted=0
+            local files_changed=0
+            
+            # Parse git log --numstat for line changes
+            local numstat_output
+            numstat_output=$(eval "$git_log_cmd --numstat --pretty=format: 2>/dev/null" || echo "")
+            
+            if [[ -n "$numstat_output" ]]; then
+                # Sum additions and deletions
+                while IFS=$'\t' read -r added deleted filename; do
+                    [[ -z "$added" ]] && continue
+                    [[ "$added" == "-" ]] && added=0
+                    [[ "$deleted" == "-" ]] && deleted=0
+                    lines_added=$((lines_added + added))
+                    lines_deleted=$((lines_deleted + deleted))
+                    ((files_changed++))
+                done <<< "$numstat_output"
+            fi
+            
+            # Get branches worked on
+            local branches
+            branches=$(git -C "$repo_dir" branch --contains HEAD 2>/dev/null | \
+                sed 's/^[* ]*//' | \
+                grep -v '^$' | \
+                tr '\n' ',' | \
+                sed 's/,$//' | \
+                awk '{print "[\"" $0 "\"]"}' | \
+                sed 's/,/","/g' 2>/dev/null || echo "[]")
+            [[ -z "$branches" || "$branches" == '[""]' ]] && branches="[]"
+            
+            # Add to totals
+            total_commits=$((total_commits + commit_count))
+            total_lines_added=$((total_lines_added + lines_added))
+            total_lines_deleted=$((total_lines_deleted + lines_deleted))
+            total_files_changed=$((total_files_changed + files_changed))
+            
+            # Build repository object (properly formatted JSON) - escape path for JSON
+            local repo_path_escaped
+            repo_path_escaped=$(echo "$repo_dir" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+            printf '{"name":"%s","path":"%s","commits":%d,"lines_added":%d,"lines_deleted":%d,"files_changed":%d,"branches_worked":%s},\n' \
+                "$repo_name" "$repo_path_escaped" "$commit_count" "$lines_added" "$lines_deleted" "$files_changed" "$branches" >> "$temp_repos" 2>/dev/null || \
+                log_error "Failed to write repository data for $repo_name"
         fi
     done < <(find "$user_home" -type d -name ".git" -maxdepth 4 2>/dev/null || true)
     
-    # Convert to JSON
-    if [[ -s "$temp_activity" ]]; then
-        sort "$temp_activity" | \
-            jq -R 'split("\t") | {(.[0]): (.[1] | tonumber)}' | \
-            jq -s 'add // {}'
-    else
-        echo "{}"
+    # Build final JSON
+    local repositories="[]"
+    if [[ -s "$temp_repos" ]]; then
+        # Read JSON objects line by line and build array
+        repositories="["
+        local first=true
+        while IFS= read -r line; do
+            # Skip empty lines
+            [[ -z "$line" ]] && continue
+            # Remove trailing comma if present
+            line="${line%,}"
+            if [[ "$first" == true ]]; then
+                repositories="$repositories$line"
+                first=false
+            else
+                repositories="$repositories,$line"
+            fi
+        done < "$temp_repos"
+        repositories="$repositories]"
+        
+        # Validate JSON
+        if ! echo "$repositories" | jq empty 2>/dev/null; then
+            log_error "Invalid repository JSON generated"
+            repositories="[]"
+        fi
     fi
     
-    rm -f "$temp_activity"
+    rm -f "$temp_repos"
+    
+    # Return comprehensive git activity JSON
+    cat <<EOF
+{
+  "total_commits": $total_commits,
+  "total_lines_added": $total_lines_added,
+  "total_lines_deleted": $total_lines_deleted,
+  "total_files_changed": $total_files_changed,
+  "repositories": $repositories
+}
+EOF
 }
 
 
@@ -505,7 +583,7 @@ collect_active_projects() {
     fi
 }
 
-# OPTIMIZED: Parallel data collection
+# OPTIMIZED: Parallel data collection with enhanced metrics
 collect_hourly_data() {
     log "Collecting hourly telemetry data..."
     
@@ -514,16 +592,13 @@ collect_hourly_data() {
     local hour="$CURRENT_HOUR"
     
     # OPTIMIZATION: Collect data in parallel using temp files
-    local tmp_cmd="$DATA_DIR/tmp_cmd_$$"
     local tmp_tools="$DATA_DIR/tmp_tools_$$"
     local tmp_proj="$DATA_DIR/tmp_proj_$$"
     local tmp_git="$DATA_DIR/tmp_git_$$"
+    local tmp_dev="$DATA_DIR/tmp_dev_$$"
     local tmp_api="$DATA_DIR/tmp_api_$$"
     
     # Run collections in parallel
-    collect_shell_commands > "$tmp_cmd" 2>/dev/null &
-    local pid_cmd=$!
-    
     collect_active_tools > "$tmp_tools" 2>/dev/null &
     local pid_tools=$!
     
@@ -533,38 +608,52 @@ collect_hourly_data() {
     collect_git_activity > "$tmp_git" 2>/dev/null &
     local pid_git=$!
     
+    collect_development_activity > "$tmp_dev" 2>/dev/null &
+    local pid_dev=$!
+    
     collect_api_connections > "$tmp_api" 2>/dev/null &
     local pid_api=$!
     
     # Wait for all background jobs to complete
-    wait $pid_cmd $pid_tools $pid_proj $pid_git $pid_api 2>/dev/null || true
+    wait $pid_tools $pid_proj $pid_git $pid_dev $pid_api 2>/dev/null || true
     
-    # Read results
-    local commands
-    commands=$(cat "$tmp_cmd" 2>/dev/null || echo "{}")
+    # Read results with fallback defaults
     local tools
     tools=$(cat "$tmp_tools" 2>/dev/null || echo "[]")
+    [[ -z "$tools" || "$tools" == "" ]] && tools="[]"
+    
     local projects
     projects=$(cat "$tmp_proj" 2>/dev/null || echo "[]")
+    [[ -z "$projects" || "$projects" == "" ]] && projects="[]"
+    
     local git_activity
-    git_activity=$(cat "$tmp_git" 2>/dev/null || echo "{}")
+    git_activity=$(cat "$tmp_git" 2>/dev/null || echo '{\"total_commits\":0,\"total_lines_added\":0,\"total_lines_deleted\":0,\"total_files_changed\":0,\"repositories\":[]}')
+    [[ -z "$git_activity" || "$git_activity" == "" ]] && git_activity='{\"total_commits\":0,\"total_lines_added\":0,\"total_lines_deleted\":0,\"total_files_changed\":0,\"repositories\":[]}'
+    
+    local development_activity
+    development_activity=$(cat "$tmp_dev" 2>/dev/null || echo '{\"test_runs_detected\":0,\"build_commands_detected\":0}')
+    [[ -z "$development_activity" || "$development_activity" == "" ]] && development_activity='{\"test_runs_detected\":0,\"build_commands_detected\":0}'
+    
     local api_connections
     api_connections=$(cat "$tmp_api" 2>/dev/null || echo "{}")
+    [[ -z "$api_connections" || "$api_connections" == "" ]] && api_connections="{}"
     
     # Cleanup temp files
-    rm -f "$tmp_cmd" "$tmp_tools" "$tmp_proj" "$tmp_git" "$tmp_api"
+    rm -f "$tmp_tools" "$tmp_proj" "$tmp_git" "$tmp_dev" "$tmp_api"
     
     # Determine if this hour counts as "active"
     local is_active=false
-    local cmd_count
-    cmd_count=$(echo "$commands" | jq 'keys | length' 2>/dev/null || echo "0")
     local project_count
     project_count=$(echo "$projects" | jq 'length' 2>/dev/null || echo "0")
-    local git_count
-    git_count=$(echo "$git_activity" | jq 'keys | length' 2>/dev/null || echo "0")
+    local git_commits
+    git_commits=$(echo "$git_activity" | jq '.total_commits' 2>/dev/null || echo "0")
+    local test_runs
+    test_runs=$(echo "$development_activity" | jq '.test_runs_detected' 2>/dev/null || echo "0")
+    local builds
+    builds=$(echo "$development_activity" | jq '.build_commands_detected' 2>/dev/null || echo "0")
     
-    # Active if: commands executed OR project files modified OR commits made
-    if [[ $cmd_count -gt 0 ]] || [[ $project_count -gt 0 ]] || [[ $git_count -gt 0 ]]; then
+    # Active if: project files modified OR commits made OR tests/builds run
+    if [[ $project_count -gt 0 ]] || [[ $git_commits -gt 0 ]] || [[ $test_runs -gt 0 ]] || [[ $builds -gt 0 ]]; then
         is_active=true
     fi
     
@@ -574,10 +663,10 @@ collect_hourly_data() {
   "timestamp": "$timestamp",
   "hour": $hour,
   "is_active": $is_active,
-  "commands": $commands,
   "tools_used": $tools,
   "projects": $projects,
-  "git_commits": $git_activity,
+  "git_activity": $git_activity,
+  "development_activity": $development_activity,
   "api_connections": $api_connections
 }
 EOF
@@ -609,25 +698,42 @@ aggregate_hourly_to_daily() {
             .[0] as $daily |
             .[1] as $hourly |
             
-            # Merge commands
-            ($daily.commands + $hourly.commands) as $merged_cmds |
-            ($merged_cmds | to_entries | group_by(.key) | map({
-                key: .[0].key,
-                value: (map(.value) | add)
-            }) | from_entries) as $summed_cmds |
-            
             # Merge tools (unique) - ONLY if active
             (if $hourly.is_active then ($daily.tools_used + $hourly.tools_used) else $daily.tools_used end | unique) as $merged_tools |
             
             # Merge projects (unique)
             (($daily.projects + $hourly.projects) | unique) as $merged_projects |
             
-            # Merge git commits (sum counts per repo)
-            ($daily.git_commits // {} + $hourly.git_commits // {}) as $merged_git |
-            ($merged_git | to_entries | group_by(.key) | map({
-                key: .[0].key,
-                value: (map(.value) | add)
-            }) | from_entries) as $summed_git |
+            # Merge git activity (sum totals and merge repositories)
+            ($daily.git_activity // {total_commits:0,total_lines_added:0,total_lines_deleted:0,total_files_changed:0,repositories:[]}) as $daily_git |
+            ($hourly.git_activity // {total_commits:0,total_lines_added:0,total_lines_deleted:0,total_files_changed:0,repositories:[]}) as $hourly_git |
+            {
+                total_commits: ($daily_git.total_commits + $hourly_git.total_commits),
+                total_lines_added: ($daily_git.total_lines_added + $hourly_git.total_lines_added),
+                total_lines_deleted: ($daily_git.total_lines_deleted + $hourly_git.total_lines_deleted),
+                total_files_changed: ($daily_git.total_files_changed + $hourly_git.total_files_changed),
+                repositories: (
+                    ($daily_git.repositories + $hourly_git.repositories) |
+                    group_by(.name) |
+                    map({
+                        name: .[0].name,
+                        path: .[0].path,
+                        commits: (map(.commits) | add),
+                        lines_added: (map(.lines_added) | add),
+                        lines_deleted: (map(.lines_deleted) | add),
+                        files_changed: (map(.files_changed) | add),
+                        branches_worked: (map(.branches_worked[]) | unique)
+                    })
+                )
+            } as $merged_git |
+            
+            # Merge development activity (sum counts)
+            ($daily.development_activity // {test_runs_detected:0,build_commands_detected:0}) as $daily_dev |
+            ($hourly.development_activity // {test_runs_detected:0,build_commands_detected:0}) as $hourly_dev |
+            {
+                test_runs_detected: ($daily_dev.test_runs_detected + $hourly_dev.test_runs_detected),
+                build_commands_detected: ($daily_dev.build_commands_detected + $hourly_dev.build_commands_detected)
+            } as $merged_dev |
             
             # Merge API usage (sum connections per service)
             ($daily.api_connections // {} + $hourly.api_connections // {}) as $merged_api |
@@ -643,10 +749,10 @@ aggregate_hourly_to_daily() {
             (if $hourly.is_active then ($daily.active_hours + 1) else $daily.active_hours end) as $updated_active |
             
             $daily |
-            .commands = $summed_cmds |
             .tools_used = $merged_tools |
             .projects = $merged_projects |
-            .git_commits = $summed_git |
+            .git_activity = $merged_git |
+            .development_activity = $merged_dev |
             .api_connections = $summed_api |
             .hours_collected = $updated_hours |
             .active_hours = $updated_active
@@ -690,7 +796,7 @@ send_daily_data() {
     local git_name
     git_name=$(git config --global user.name 2>/dev/null || echo "")
     
-    # Build the final payload
+    # Build the final payload with enhanced metrics
     local payload
     payload=$(echo "$daily_data" | jq --arg dev "$username" --arg host "$hostname" --arg email "$git_email" --arg name "$git_name" '{
         date: .date,
@@ -701,8 +807,9 @@ send_daily_data() {
         metrics: {
             active_hours: .active_hours,
             tools_used: .tools_used,
-            commands: .commands,
-            projects: .projects
+            projects: .projects,
+            git_activity: (.git_activity // {total_commits:0,total_lines_added:0,total_lines_deleted:0,total_files_changed:0,repositories:[]}),
+            development_activity: (.development_activity // {test_runs_detected:0,build_commands_detected:0})
         }
     }')
     
