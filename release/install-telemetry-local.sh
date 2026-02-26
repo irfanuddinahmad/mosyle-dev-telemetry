@@ -148,9 +148,8 @@ else
     "collect_urls": false,
     "exclude_commands": []
   },
-  "developer_tools": [
+  "tools": [
     "vscode",
-    "code",
     "intellij",
     "pycharm",
     "goland",
@@ -165,8 +164,21 @@ else
     "make",
     "gradle",
     "maven",
-    "curl",
-    "brew"
+    "figma",
+    "sketch",
+    "adobe-xd",
+    "illustrator",
+    "photoshop",
+    "principle",
+    "framer",
+    "zeplin",
+    "postman",
+    "cypress",
+    "insomnia",
+    "bruno",
+    "selenium",
+    "playwright",
+    "charles-proxy"
   ]
 }
 EOF

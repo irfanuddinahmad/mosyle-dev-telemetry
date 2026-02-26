@@ -9,7 +9,7 @@
     "collect_urls": false,
     "exclude_commands": []
   },
-  "developer_tools": [
+  "tools": [
     "vscode",
     "intellij",
     "pycharm",
@@ -24,6 +24,21 @@
     "java",
     "make",
     "gradle",
-    "maven"
+    "maven",
+    "figma",
+    "sketch",
+    "adobe-xd",
+    "illustrator",
+    "photoshop",
+    "principle",
+    "framer",
+    "zeplin",
+    "postman",
+    "cypress",
+    "insomnia",
+    "bruno",
+    "selenium",
+    "playwright",
+    "charles-proxy"
   ]
 }
