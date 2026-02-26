@@ -233,7 +233,7 @@ collect_development_activity() {
     local build_commands=0
     
     # Extract test patterns from unified logs
-    local test_patterns="pytest|npm test|npm run test|go test|jest|make test|python -m pytest|python -m unittest"
+    local test_patterns="pytest|npm test|npm run test|go test|jest|make test|python -m pytest|python -m unittest|cypress run|cypress open|playwright test|selenium|robot|cucumber|behave|newman|k6 run|locust|artillery"
     test_runs=$(log show --predicate 'process == "bash" || process == "zsh" || process == "sh"' \
         --style compact \
         --last "$time_range" 2>/dev/null | \
@@ -241,7 +241,7 @@ collect_development_activity() {
         wc -l | tr -d ' ' || echo "0")
     
     # Extract build patterns from unified logs
-    local build_patterns="docker build|npm run build|npm build|make build|go build|gradle build|mvn package|mvn install"
+    local build_patterns="docker build|npm run build|npm build|make build|go build|gradle build|mvn package|mvn install|cypress run|playwright test"
     build_commands=$(log show --predicate 'process == "bash" || process == "zsh" || process == "sh"' \
         --style compact \
         --last "$time_range" 2>/dev/null | \
@@ -507,6 +507,39 @@ collect_api_connections() {
                 *openai.com*)
                     echo "openai" >> "$temp_api"
                     ;;
+                *figma.com*)
+                    echo "figma" >> "$temp_api"
+                    ;;
+                *sketch.com*|*sketch.cloud*)
+                    echo "sketch" >> "$temp_api"
+                    ;;
+                *adobe.com*)
+                    echo "adobe" >> "$temp_api"
+                    ;;
+                *miro.com*)
+                    echo "miro" >> "$temp_api"
+                    ;;
+                *zeplin.io*)
+                    echo "zeplin" >> "$temp_api"
+                    ;;
+                *invisionapp.com*)
+                    echo "invision" >> "$temp_api"
+                    ;;
+                *testrail.io*|*testrail.com*)
+                    echo "testrail" >> "$temp_api"
+                    ;;
+                *browserstack.com*)
+                    echo "browserstack" >> "$temp_api"
+                    ;;
+                *saucelabs.com*)
+                    echo "saucelabs" >> "$temp_api"
+                    ;;
+                *getpostman.com*)
+                    echo "postman-cloud" >> "$temp_api"
+                    ;;
+                *cypress.io*)
+                    echo "cypress-cloud" >> "$temp_api"
+                    ;;
             esac
         done
     fi
@@ -525,27 +558,58 @@ collect_api_connections() {
 }
 
 
+# OPTIMIZATION: Unified tool detection via single awk call
+# Covers developer, UX design, and QA tools in one pass
 collect_active_tools() {
-    local tools=()
-    
-    # Get all running process names in one call
+    # Get all running process command lines in one call, then detect all tools
+    # in a single awk pass — no separate grep per tool
     local procs
-    procs=$(ps aux 2>/dev/null | awk '{for(i=11;i<=NF;i++) printf "%s ", $i; print ""}' | grep -iE "code|idea|pycharm|goland|docker|git|node|npm|python" || echo "")
+    procs=$(ps aux 2>/dev/null | awk '{for(i=11;i<=NF;i++) printf "%s ", $i; print ""}')
     
-    # Check against the cached process list
-    grep -qi "visual studio code\|\\bcode\\b" <<< "$procs" && tools+=("vscode")
-    grep -qi "intellij idea\|\\bidea\\b" <<< "$procs" && tools+=("intellij")
-    grep -qi "pycharm" <<< "$procs" && tools+=("pycharm")
-    grep -qi "goland" <<< "$procs" && tools+=("goland")
-    grep -qi "docker\|com\\.docker" <<< "$procs" && tools+=("docker")
-    grep -qi "\\bgit\\b" <<< "$procs" && tools+=("git")
-    grep -qi "\\bgo\\b" <<< "$procs" && tools+=("go")
-    grep -qi "\\bnode\\b\|\\bnpm\\b" <<< "$procs" && tools+=("node")
-    grep -qi "python" <<< "$procs" && tools+=("python")
-    
-    # OPTIMIZATION: Single jq call instead of two
-    if [[ ${#tools[@]} -gt 0 ]]; then
-        printf '%s\n' "${tools[@]}" | jq -Rs 'split("\n") | map(select(length > 0))'
+    # Single awk call: scan all process lines and emit matched tool names (deduplicated)
+    local detected
+    detected=$(echo "$procs" | awk '
+    BEGIN { IGNORECASE = 1 }
+    {
+        line = $0
+
+        # --- Developer Tools ---
+        if (line ~ /visual studio code/ || line ~ /(^| )code( |$)/)  t["vscode"]
+        if (line ~ /intellij idea/ || line ~ /(^| )idea( |$)/)       t["intellij"]
+        if (line ~ /pycharm/)                                        t["pycharm"]
+        if (line ~ /goland/)                                         t["goland"]
+        if (line ~ /webstorm/)                                       t["webstorm"]
+        if (line ~ /docker/ || line ~ /com\.docker/)                 t["docker"]
+        if (line ~ /(^| )git( |$)/)                                  t["git"]
+        if (line ~ /(^| )go( |$)/)                                   t["go"]
+        if (line ~ /(^| )node( |$)/ || line ~ /(^| )npm( |$)/)      t["node"]
+        if (line ~ /python/)                                         t["python"]
+
+        # --- UX Design Tools ---
+        if (line ~ /figma/)                                          t["figma"]
+        if (line ~ /(^| )sketch( |$)/)                               t["sketch"]
+        if (line ~ /adobe xd/ || line ~ /(^| )xd( |$)/)             t["adobe-xd"]
+        if (line ~ /illustrator/)                                    t["illustrator"]
+        if (line ~ /photoshop/)                                      t["photoshop"]
+        if (line ~ /principle/)                                       t["principle"]
+        if (line ~ /framer/)                                         t["framer"]
+        if (line ~ /zeplin/)                                         t["zeplin"]
+
+        # --- QA / Testing Tools ---
+        if (line ~ /postman/)                                        t["postman"]
+        if (line ~ /cypress/)                                        t["cypress"]
+        if (line ~ /insomnia/)                                       t["insomnia"]
+        if (line ~ /bruno/)                                          t["bruno"]
+        if (line ~ /selenium/)                                       t["selenium"]
+        if (line ~ /playwright/)                                     t["playwright"]
+        if (line ~ /charles/ || line ~ /Charles Proxy/)              t["charles-proxy"]
+    }
+    END { for (tool in t) print tool }
+    ')
+
+    # Convert to JSON array via jq
+    if [[ -n "$detected" ]]; then
+        echo "$detected" | jq -Rs 'split("\n") | map(select(length > 0))'
     else
         echo "[]"
     fi
@@ -660,9 +724,15 @@ collect_hourly_data() {
     test_runs=$(echo "$development_activity" | jq '.test_runs_detected' 2>/dev/null || echo "0")
     local builds
     builds=$(echo "$development_activity" | jq '.build_commands_detected' 2>/dev/null || echo "0")
+    # Count NEW API connections (differential — only fresh connections, not idle ones)
+    local api_conn_count
+    api_conn_count=$(echo "$api_connections" | jq '[.[] | values] | add // 0' 2>/dev/null || echo "0")
     
-    # Active if: project files modified OR commits made OR tests/builds run
-    if [[ $project_count -gt 0 ]] || [[ $git_commits -gt 0 ]] || [[ $test_runs -gt 0 ]] || [[ $builds -gt 0 ]]; then
+    # Active if: project files modified OR commits OR tests/builds OR new API connections
+    # NOTE: We intentionally do NOT use tool_count here. Tools left open but idle
+    # (e.g. Figma/VSCode in background) would cause false-positive active hours.
+    # API connections use differential tracking so only active service usage counts.
+    if [[ $project_count -gt 0 ]] || [[ $git_commits -gt 0 ]] || [[ $test_runs -gt 0 ]] || [[ $builds -gt 0 ]] || [[ $api_conn_count -gt 0 ]]; then
         is_active=true
     fi
     

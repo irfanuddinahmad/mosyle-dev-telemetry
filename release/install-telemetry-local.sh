@@ -134,44 +134,13 @@ echo ""
 echo "Step 4: Installing configuration file..."
 if [[ -f "$CONFIG_PATH" ]]; then
     echo "ℹ Configuration file already exists at $CONFIG_PATH (preserving existing)"
-else
-    # Create default config with test URLs
-    cat > "$CONFIG_PATH" << 'EOF'
-{
-  "webhook_url": "http://localhost:8080/plugins/developer_telemetry/connections/1/report",
-  "webhook_url_secondary": "https://webhook.site/YOUR-UNIQUE-UUID-HERE",
-  "collection_interval_seconds": 3600,
-  "data_retention_days": 30,
-  "privacy": {
-    "collect_command_arguments": false,
-    "collect_file_paths": false,
-    "collect_urls": false,
-    "exclude_commands": []
-  },
-  "developer_tools": [
-    "vscode",
-    "code",
-    "intellij",
-    "pycharm",
-    "goland",
-    "webstorm",
-    "docker",
-    "git",
-    "go",
-    "node",
-    "npm",
-    "python",
-    "java",
-    "make",
-    "gradle",
-    "maven",
-    "curl",
-    "brew"
-  ]
-}
-EOF
+elif [[ -f "$SOURCE_DIR/$CONFIG_NAME" ]]; then
+    cp "$SOURCE_DIR/$CONFIG_NAME" "$CONFIG_PATH"
     chmod 644 "$CONFIG_PATH"
-    echo "✓ Configuration file created at $CONFIG_PATH"
+    echo "✓ Configuration copied from $SOURCE_DIR/$CONFIG_NAME"
+else
+    echo "ERROR: Cannot find $CONFIG_NAME in $SOURCE_DIR"
+    exit 1
 fi
 echo ""
 
@@ -214,8 +183,7 @@ echo "================================================"
 echo ""
 echo "The telemetry collector is now installed and will:"
 echo "  • Collect data every hour"
-echo "  • Send to Primary URL: http://localhost:8080/plugins/developer_telemetry/connections/1/report"
-echo "  • Send to Secondary URL: https://webhook.site/YOUR-UNIQUE-UUID-HERE"
+echo "  • Send daily summaries to the webhook configured in $CONFIG_PATH"
 echo "  • Run automatically on user login"
 echo ""
 echo "Configuration: $CONFIG_PATH"
