@@ -63,6 +63,10 @@ log_error() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" | tee -a "$LOG_FILE" >&2
 }
 
+log_warn() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARN: $*" | tee -a "$LOG_FILE"
+}
+
 # ============================================================================
 # Configuration Loading (OPTIMIZED: Cached)
 # ============================================================================
@@ -131,7 +135,10 @@ init() {
         stored_date=$(jq -r '.date // empty' "$DAILY_AGGREGATE_FILE" 2>/dev/null || echo "")
         if [[ "$stored_date" != "$CURRENT_DATE" ]]; then
             # New day - send previous day's data first, then reset
-            send_daily_data
+            # NOTE: Use || true so that a failed webhook send does NOT exit the script
+            # (set -e is active). The date MUST reset even if the send fails, otherwise
+            # the aggregate file stays stuck on the old date forever.
+            send_daily_data || log_warn "Failed to send data for $stored_date — resetting to new day anyway"
             echo '{"date":"'"$CURRENT_DATE"'","hours_collected":[],"tools_used":[],"projects":[],"git_activity":{"total_commits":0,"total_lines_added":0,"total_lines_deleted":0,"total_files_changed":0,"repositories":[]},"development_activity":{"test_runs_detected":0,"build_commands_detected":0},"api_connections":{},"active_hours":0}' > "$DAILY_AGGREGATE_FILE"
         fi
     fi
